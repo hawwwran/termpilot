@@ -369,6 +369,9 @@ termpilot --set-relay-secret SECRET    persist the relay Bearer token (config.ph
 termpilot --clear-relay-secret         remove the stored Bearer token
 termpilot --generate-token             sudo-gated; mint a random 32-byte token, save (keyring/file)
 termpilot --show-token                 sudo-gated; reveal stored token
+termpilot --version                    print installed version + check for newer release
+termpilot --update                     check for newer release; install if user accepts
+                                       (skips the install prompt in dev checkouts)
 termpilot                              spawn $SHELL in a PTY
 termpilot bash                         spawn bash explicitly
 termpilot tmux new -A -s main          persistent tmux session
@@ -492,6 +495,50 @@ To switch back to the installed prod copy after dev work:
   by default), pushes the tag, and polls until the release asset is
   attached. It's sudo-gated (anti-shoulder-surf) and uses `gh` for
   the release API checks.
+
+### On-start update notice (deferred, two-phase)
+
+Each `termpilot run` invocation does two cheap things to surface a
+new release without ever stalling or interleaving with the wrapped
+child's output. Both live in `lib/release_channel.py`.
+
+**Phase 1 (sync, 3-second budget).** Before any relay or PTY work,
+the wrapper checks for a parked notice at
+`~/.config/termpilot/update-pending.json`. If one exists, it re-queries
+GitHub. Three outcomes:
+
+| GitHub reachable? | Newer than installed? | Action |
+|---|---|---|
+| no | — | silent return; parked file untouched |
+| yes | no (caught up) | clear parked file; no banner |
+| yes | yes | show coloured banner on stderr; refresh parked tag |
+
+The banner is a short coloured stripe printed BEFORE the wrapper's
+own connect-banner and session start, so it always renders above the
+wrapped child's TTY output:
+
+```
+═══ TermPilot update ════════════════════════════════════
+  v0.1.1 available  (installed: 0.0.0)
+  Run termpilot --update to install
+═════════════════════════════════════════════════════════
+```
+
+**Phase 2 (async, daemon thread, 3-second timeout).** After Phase 1,
+a background thread queries GitHub and writes the parked file (or
+clears it if we've caught up) for the *next* invocation. Runs while
+the PTY child has the screen, so a slow GitHub never delays the
+session and stale info is never written into the child's output.
+
+The deferred display is the point: a sync check on every session
+start would either add up to 3s of latency (acceptable but
+noticeable), or risk splattering text into the wrapped child if the
+result arrived after the PTY took over. Parking the *result* for
+next start sidesteps both.
+
+Dev checkouts (`.git` next to the wrapper) skip both phases — the
+developer doesn't need to be nudged toward `termpilot --update`,
+which is a no-op in dev anyway.
 
 ## Setup (browser side)
 

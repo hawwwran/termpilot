@@ -114,6 +114,14 @@ termpilot --version    # prints installed version + checks GitHub for newer
 termpilot --update     # if a newer release exists, prompts to install it
 ```
 
+You also get a passive nudge for free: each `termpilot` session start
+does a fast (3-second budget) background check against GitHub and, on
+the *next* session start, prints a coloured one-line notice if a newer
+release is parked. The check is silent if GitHub is unreachable and
+skipped entirely in dev checkouts, so it never blocks or noises up
+your terminal. See [`ARCHITECTURE.md`](ARCHITECTURE.md#on-start-update-notice-deferred-two-phase)
+for the exact flow.
+
 ## PC-side install (develop / contribute)
 
 If you cloned the repo and want to point `termpilot` at the dev tree
