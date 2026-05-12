@@ -370,9 +370,13 @@ termpilot --clear-relay-secret         remove the stored Bearer token
 termpilot --generate-token             sudo-gated; mint a random 32-byte token, save (keyring/file)
 termpilot --show-token                 sudo-gated; reveal stored token
 termpilot                              spawn $SHELL in a PTY
-termpilot -- bash                      spawn bash explicitly
-termpilot -- tmux new -A -s main       persistent tmux session
-termpilot -- htop                      any interactive program
+termpilot bash                         spawn bash explicitly
+termpilot tmux new -A -s main          persistent tmux session
+termpilot htop                         any interactive program
+tp claude                              any command works directly — the `--` separator
+                                       is only needed when the child takes a flag that
+                                       collides with a wrapper flag (--force, --insecure,
+                                       --no-local, --title, --relay, --auth)
 tp                                     short alias for `termpilot` (set by install.sh
                                        only if nothing else on the system provides `tp`)
 ```

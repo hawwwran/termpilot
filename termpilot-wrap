@@ -456,9 +456,11 @@ Setup (run once)
 
 Run
   termpilot                          spawn $SHELL through the wrapper
-  termpilot -- bash                  spawn bash explicitly
-  termpilot -- tmux new -A -s main   persistent tmux session (survives detach)
-  termpilot -- htop                  any interactive program in a PTY
+  termpilot bash                     spawn bash explicitly
+  termpilot tmux new -A -s main      persistent tmux session (survives detach)
+  termpilot htop                     any interactive program in a PTY
+  termpilot -- bash --foo            use -- only when the child takes a flag
+                                     that collides with a wrapper flag
 
 Configuration files (under ~/.config/termpilot/)
   relay-url        base URL of the relay deployment (set via --set-relay-url);
@@ -1671,7 +1673,7 @@ def main(argv=None):
         return release_channel.cmd_update(argv[1:], SCRIPT_DIR)
     if argv and argv[0] == "run":
         return cmd_run(argv[1:])
-    # No subcommand → run-mode (so `termpilot -- bash` still works).
+    # No subcommand → run-mode (so `termpilot bash` works without `--`).
     return cmd_run(argv)
 
 

@@ -65,9 +65,9 @@ cat > "$ALIAS_FILE" <<EOF
 #   termpilot --generate-token             create or replace the encryption token
 #   termpilot --show-token                 reveal the stored token (after password)
 #   termpilot                              spawn \$SHELL through the wrapper
-#   termpilot -- bash                spawn bash explicitly
-#   termpilot -- tmux new -A -s main attach/create persistent tmux session
-#   termpilot -- htop                run any program in a PTY
+#   termpilot bash                         spawn bash explicitly
+#   termpilot tmux new -A -s main          attach/create persistent tmux session
+#   termpilot htop                         run any program in a PTY
 
 termpilot() {
     if [[ ! -x "$WRAP_PATH" ]]; then

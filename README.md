@@ -154,13 +154,19 @@ Then in any project directory:
 ```sh
 termpilot                          # spawn $SHELL through the wrapper
 tp                                 # same as `termpilot` (if alias is active)
-termpilot -- bash                  # spawn bash explicitly
-termpilot -- tmux new -A -s main   # attach/create persistent tmux session
-termpilot -- htop                  # any interactive program in a PTY
+termpilot bash                     # spawn bash explicitly
+termpilot tmux new -A -s main      # attach/create persistent tmux session
+termpilot htop                     # any interactive program in a PTY
+tp claude                          # any command works — no -- needed
 termpilot --show-token             # sudo-gated; reveal the stored token
 termpilot --get-relay-url          # print the currently configured relay URL
 termpilot --force                  # bypass the per-cwd single-instance lock
 ```
+
+(Use `termpilot -- <cmd>` explicitly only when the child command takes a
+flag that collides with one of the wrapper's own: `--force`, `--insecure`,
+`--no-local`, `--title`, `--relay`, `--auth`. Otherwise the `--` is
+unnecessary.)
 
 Each `termpilot` invocation registers a new session on the relay and
 spawns the given command (or `$SHELL` if none given) in a PTY. The
@@ -168,7 +174,7 @@ title shown in the browser sidebar defaults to `basename "$PWD"`.
 
 For long-lived sessions that survive `termpilot` exiting, wrap the
 command in `tmux new -A -s <name>` — attaching/detaching is free, and
-the next `termpilot -- tmux new -A -s <name>` from any tab reconnects.
+the next `termpilot tmux new -A -s <name>` from any tab reconnects.
 
 If a previous wrapper crashed within the last 5 minutes, the new wrapper
 reuses the same relay session id and replays any unsent output bytes
@@ -203,7 +209,7 @@ php -S 127.0.0.1:6019 -t .
 # different terminal:
 cd ..
 TERMPILOT_RELAY=http://127.0.0.1:6019/relay.php \
-  ./termpilot-wrap run --insecure --title demo -- bash
+  ./termpilot-wrap run --insecure --title demo bash
 # browser: http://127.0.0.1:6019/index.html
 ```
 

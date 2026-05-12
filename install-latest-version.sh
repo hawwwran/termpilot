@@ -42,8 +42,10 @@ prompt() {
     local q="$1" def="$2" reply prompt_str
     if [[ "$def" == "y" ]]; then prompt_str="$q [Y/n] "
     else                          prompt_str="$q [y/N] "; fi
-    if [[ ! -r /dev/tty ]]; then
-        # Non-interactive environment — fall back to default.
+    # `-r /dev/tty` returns true even when the process has no
+    # controlling terminal (the device file exists), so the real check
+    # is whether a write actually succeeds. Probe in a subshell.
+    if ! ( : > /dev/tty ) 2>/dev/null; then
         info "(non-interactive: defaulting to $def)"
         [[ "$def" == "y" ]]
         return
@@ -188,6 +190,7 @@ echo -e "  Activate:  ${YELLOW}open a new terminal${NC} (or source ~/.bashrc)"
 echo ""
 echo -e "${WHITE}Then in any project dir:${NC}"
 echo -e "  ${CYAN}termpilot --set-relay-url https://your.host/path${NC}   if not yet set"
-echo -e "  ${CYAN}termpilot -- bash${NC}                                  to launch a session"
-echo -e "  ${CYAN}termpilot --version${NC}                                to check the installed version"
-echo -e "  ${CYAN}termpilot --update${NC}                                 to install the next release"
+echo -e "  ${CYAN}termpilot${NC}                                          launch \$SHELL in a session"
+echo -e "  ${CYAN}termpilot bash${NC}                                     or any program — no -- needed"
+echo -e "  ${CYAN}termpilot --version${NC}                                check the installed version"
+echo -e "  ${CYAN}termpilot --update${NC}                                 install the next release"
