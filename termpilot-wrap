@@ -1136,6 +1136,16 @@ def _print_startup_banner(sid: str, spool_count: int, spool_bytes: int) -> None:
 
 def cmd_run(argv):
     args, cmd = parse_run_args(argv)
+    # Update channel: print any pending notice (sync, 3s budget) and
+    # kick off an async check that parks a notice for the *next*
+    # invocation. Both no-op in dev checkouts and never raise — the
+    # update channel must not block or break a session start.
+    try:
+        from lib import release_channel
+        release_channel.handle_pending_update_notice(SCRIPT_DIR)
+        release_channel.spawn_async_update_check(SCRIPT_DIR)
+    except Exception:
+        pass
     # Fall back to ~/.config/termpilot/relay-url if neither --relay nor
     # $TERMPILOT_RELAY was provided. Lets the binary stand alone without the
     # shell function priming TERMPILOT_RELAY.

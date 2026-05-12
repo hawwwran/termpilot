@@ -19,6 +19,8 @@ import shlex
 import ssl
 import subprocess
 import sys
+import threading
+import time
 import urllib.error
 import urllib.request
 
@@ -26,6 +28,17 @@ import urllib.request
 GITHUB_REPO       = "hawwwran/termpilot"
 GITHUB_LATEST_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 INSTALLER_RAW     = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/install-latest-version.sh"
+
+# Where the deferred update notice is parked between sessions. Written
+# by the async post-start check; read by the sync pre-start check on
+# the *next* invocation. Living in ~/.config/termpilot/ keeps the file
+# per-user (no /tmp races) and adjacent to the other config files.
+PENDING_NOTICE_FILE = os.path.expanduser("~/.config/termpilot/update-pending.json")
+
+# Short timeout for the on-start checks — we never want the wrapper to
+# stall a session because GitHub or DNS is flaky. The user-facing
+# `--version` / `--update` paths keep the longer default.
+ON_START_TIMEOUT_S = 3.0
 
 
 def _read_local_version(script_dir: str):
@@ -54,8 +67,10 @@ def _semver_tuple(s: str | None):
     return tuple(out)
 
 
-def _fetch_latest_tag() -> str | None:
-    """Hit the GitHub API for the latest release. Returns tag str or None."""
+def _fetch_latest_tag(timeout: float = 15.0) -> str | None:
+    """Hit the GitHub API for the latest release. Returns tag str or
+    None. `timeout` is per-request seconds; the on-start checks pass a
+    short value so a wrapped session never stalls on network trouble."""
     try:
         req = urllib.request.Request(GITHUB_LATEST_API, headers={
             # GitHub requires a User-Agent on every request.
@@ -63,7 +78,7 @@ def _fetch_latest_tag() -> str | None:
             "Accept": "application/vnd.github+json",
         })
         ctx = ssl.create_default_context()
-        with urllib.request.urlopen(req, timeout=15, context=ctx) as r:
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
             data = json.loads(r.read().decode("utf-8"))
         tag = data.get("tag_name")
         if isinstance(tag, str) and tag:
@@ -152,3 +167,127 @@ def cmd_update(args, script_dir: str) -> int:
     if _confirm("Install it now?"):
         return _run_installer(script_dir)
     return 0
+
+
+# ============================================================================
+#  On-start update notice (deferred — never blocks the wrapped session)
+# ============================================================================
+#
+# Each `termpilot run` invocation does two things, both quick:
+#
+#  1. SYNC pre-flight (3s max): if a previous run parked a pending
+#     notice in PENDING_NOTICE_FILE, re-check GitHub right now. If the
+#     release is still newer than installed, print a coloured notice
+#     to stderr. If we've caught up (or GitHub is reachable but says
+#     no newer), clear the pending file. If GitHub is *not* reachable,
+#     trust the stored notice and show it anyway.
+#
+#  2. ASYNC post-flight (background thread, 3s timeout): query GitHub
+#     and write/clear PENDING_NOTICE_FILE for the *next* invocation.
+#     Runs after the wrapped session has taken the TTY, so it can
+#     never write into the child's output and never slows startup.
+
+def _save_pending(tag: str) -> None:
+    d = os.path.dirname(PENDING_NOTICE_FILE)
+    try:
+        os.makedirs(d, mode=0o700, exist_ok=True)
+    except OSError:
+        return
+    tmp = PENDING_NOTICE_FILE + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump({"tag": tag, "checked_at": int(time.time())}, f)
+        os.replace(tmp, PENDING_NOTICE_FILE)
+        try: os.chmod(PENDING_NOTICE_FILE, 0o600)
+        except OSError: pass
+    except OSError:
+        try: os.unlink(tmp)
+        except OSError: pass
+
+
+def _clear_pending() -> None:
+    try: os.unlink(PENDING_NOTICE_FILE)
+    except OSError: pass
+
+
+def _read_pending_tag() -> str | None:
+    try:
+        with open(PENDING_NOTICE_FILE) as f:
+            data = json.load(f)
+        t = data.get("tag")
+        if isinstance(t, str) and t:
+            return t
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def _show_update_notice(tag: str, current_v: str | None) -> None:
+    """Compact, coloured notice to stderr. Written above any session
+    output the wrapper will produce; the wrapped child takes the TTY
+    a few lines later so this stays as a header."""
+    CYAN   = "\033[0;36m"
+    YELLOW = "\033[1;33m"
+    BOLD   = "\033[1m"
+    DIM    = "\033[2m"
+    RESET  = "\033[0m"
+    rule = "═" * 57
+    installed = f"  {DIM}(installed: {current_v}){RESET}" if current_v else ""
+    sys.stderr.write(
+        f"{CYAN}═══ TermPilot update ════════════════════════════════════{RESET}\n"
+        f"  {YELLOW}{tag}{RESET} available{installed}\n"
+        f"  Run {BOLD}termpilot --update{RESET} to install\n"
+        f"{CYAN}{rule}{RESET}\n"
+    )
+
+
+def handle_pending_update_notice(script_dir: str) -> None:
+    """Sync pre-flight: read the pending file, re-check GitHub (3s),
+    show or clear the notice accordingly. Skips in dev checkouts.
+    Never raises — any error is swallowed so a session start can't
+    be blocked by the update channel."""
+    try:
+        if _is_dev_tree(script_dir):
+            return
+        if not os.path.exists(PENDING_NOTICE_FILE):
+            return
+        v, _ = _read_local_version(script_dir)
+        latest = _fetch_latest_tag(timeout=ON_START_TIMEOUT_S)
+        if latest is None:
+            # GitHub unreachable; trust the parked tag as a still-valid
+            # notice. Don't touch the file — next time we'll re-check.
+            pending = _read_pending_tag()
+            if pending:
+                _show_update_notice(pending, v)
+            else:
+                _clear_pending()
+            return
+        if v and _semver_tuple(latest) <= _semver_tuple(v):
+            _clear_pending()
+            return
+        _show_update_notice(latest, v)
+        _save_pending(latest)
+    except Exception:
+        pass
+
+
+def spawn_async_update_check(script_dir: str) -> None:
+    """Async post-flight: fire-and-forget background thread. Writes
+    PENDING_NOTICE_FILE if a newer release exists, removes it if
+    caught up, no-ops if GitHub is unreachable. Skips in dev
+    checkouts. Daemon thread → dies with the wrapper."""
+    if _is_dev_tree(script_dir):
+        return
+    def _go():
+        try:
+            latest = _fetch_latest_tag(timeout=ON_START_TIMEOUT_S)
+            if latest is None:
+                return
+            v, _ = _read_local_version(script_dir)
+            if v and _semver_tuple(latest) <= _semver_tuple(v):
+                _clear_pending()
+                return
+            _save_pending(latest)
+        except Exception:
+            pass
+    threading.Thread(target=_go, daemon=True).start()
