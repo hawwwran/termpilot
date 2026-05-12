@@ -37,6 +37,7 @@ const SHELL = [
   "./icon-maskable-512.png",
   "./lib/crypto.js",
   "./lib/session.js",
+  "./lib/keyboard.js",
   "./lib/index.css",
   "./lib/index.js",
   "./lib/vendor/xterm.min.css",

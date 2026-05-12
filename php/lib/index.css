@@ -89,13 +89,69 @@ section { display:flex; flex-direction:column; min-width:0; min-height:0; }
 
 .log-area { flex:1; min-height:0; position:relative; display:flex; }
 #log { flex:1; min-height:0; margin:0; padding:6px; overflow:auto; font-family: ui-monospace, Menlo, Consolas, monospace; font-size:13px; line-height:1.2; color:#e7e7e7; background:#0d0f12; white-space:pre; -webkit-overflow-scrolling: touch; }
+/* Terminal caret. xterm.js runs headless; we synthesise the cursor
+   here. Block-inverse style matches the classic terminal look. */
+#log .cursor { background:#e7e7e7; color:#0d0f12; }
 #log-loading { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px; background:#0d0f12; color:#7a90b6; font-size:13px; z-index:5; pointer-events:none; }
 #log-loading[hidden] { display:none; }
 #log-loading .loader-spinner { width:32px; height:32px; border:3px solid #1d2230; border-top-color:#3d5afe; border-radius:50%; animation:termpilot-spin 800ms linear infinite; }
 #term-host { position:absolute; left:-9999px; top:0; width:0; height:0; overflow:hidden; visibility:hidden; }
 
 .ctrl { display:flex; flex-wrap:wrap; gap:4px; padding:6px 8px; border-top:1px solid #222; background:#0e1117; }
-.ctrl button { padding:6px 10px; font-size:11px; min-height:32px; }
+.ctrl button { padding:6px 10px; font-size:11px; min-height:32px; -webkit-touch-callout:none; -webkit-user-select:none; user-select:none; touch-action:manipulation; }
+
+/* ==== On-screen keyboard ============================================= */
+/* Latched-modifier bar — appears above the strip only when one or more
+   modifiers are sticky. */
+.kbd-latched { display:flex; flex-wrap:wrap; gap:6px; align-items:center; padding:6px 8px; border-top:1px solid #222; background:#1a1410; }
+.kbd-latched[hidden] { display:none; }
+.kbd-latched-pill { display:inline-flex; align-items:center; padding:4px 10px; border-radius:14px; background:#3a2418; color:#f5a524; font-size:11px; font-weight:600; border:1px solid #6e3e1a; cursor:pointer; letter-spacing:.04em; }
+.kbd-latched-pill:hover { background:#4a2e1e; }
+.kbd-latched-spacer { flex:1; }
+.kbd-cancel { padding:4px 12px; border-radius:6px; background:transparent; border:1px solid #6e3e1a; color:#f5a524; font-size:11px; cursor:pointer; }
+.kbd-cancel:hover { background:#3a2418; color:#fff; }
+
+/* Buttons that fill the keyboard strip share the same base look. */
+.kbd-strip button { padding:6px 10px; font-size:11px; min-height:32px; border-radius:6px; border:1px solid #2a2f3a; background:#1d2230; color:#dbe5ff; cursor:pointer; -webkit-touch-callout:none; -webkit-user-select:none; user-select:none; touch-action:manipulation; position:relative; }
+.kbd-strip button:hover { background:#262c3a; }
+.kbd-strip button:active { transform:scale(0.96); }
+
+/* Special left-edge buttons (more, back, edit). */
+.kbd-nav { background:#0e1117; border-color:#3d5afe; color:#a8c0ff; min-width:38px; font-weight:600; }
+.kbd-nav:hover { background:#1d2230; }
+
+/* Favourited keys in the favourites row — full-colour, distinct from
+   group buttons which are outlined. */
+.kbd-fav { background:#1d2230; border-color:#3d5afe; color:#dbe5ff; }
+.kbd-fav:hover { background:#2c3a5a; }
+
+/* Group folder buttons (Fx, =<, a-z, 0-9, Mod, Nav). Outlined to read
+   as "containers, not destinations". */
+.kbd-group { background:transparent; border-color:#2a2f3a; color:#9aa; }
+.kbd-group:hover { background:#1a1d24; color:#dbe5ff; }
+
+/* Keys inside a group. Show a tiny dot in the corner when the
+   (currentMods, key) combo is already in favourites. */
+.kbd-key { background:#15181f; border-color:#2a2f3a; color:#dbe5ff; }
+.kbd-key.favorited::after { content:""; position:absolute; top:3px; right:3px; width:5px; height:5px; border-radius:50%; background:#a8c0ff; }
+
+/* Modifier buttons in the Mod group. Latched ones glow orange. */
+.kbd-mod { font-weight:600; }
+.kbd-mod.latched { background:#3a2418; border-color:#f5a524; color:#f5a524; }
+
+/* Long-press visual feedback. */
+.kbd-strip button.long-pressing { transform:scale(1.08); box-shadow:0 0 0 2px #f5a524; }
+.kbd-strip button.long-pressing::before { content:"★"; position:absolute; top:-8px; left:50%; transform:translateX(-50%); color:#f5a524; font-size:11px; }
+
+.kbd-edit-fav { margin-left:auto; min-width:34px; background:transparent; border-color:#2a2f3a; color:#7a90b6; }
+.kbd-edit-fav:hover { color:#a8c0ff; border-color:#3d5afe; }
+
+/* ==== Reorder-favourites modal ==== */
+.modal .kbd-reorder-list { display:flex; flex-direction:column; gap:6px; margin-bottom:14px; }
+.modal .kbd-reorder-row { display:grid; grid-template-columns:36px 1fr 36px; gap:6px; align-items:center; padding:6px; background:#0e1117; border:1px solid #2a2f3a; border-radius:8px; }
+.modal .kbd-reorder-row .kbd-reorder-label { font-family:ui-monospace,monospace; font-size:13px; color:#dbe5ff; text-align:center; padding:6px; background:#15181f; border-radius:6px; }
+.modal .kbd-reorder-row button { padding:6px; font-size:14px; line-height:1; min-width:0; }
+.modal .kbd-reorder-row button:disabled { opacity:0.3; cursor:not-allowed; }
 form#inputform { display:flex; gap:8px; padding:8px; border-top:1px solid #222; background:#11141a; }
 input[type=text] { flex:1; padding:10px 12px; border-radius:6px; border:1px solid #2a2f3a; background:#0d0f12; color:#e7e7e7; font-size:14px; outline:none; }
 input[type=text]:focus { border-color:#3d5afe; }

@@ -426,7 +426,51 @@ function hideLogLoader() {
 const ANSI16 = ["#000000","#cd3131","#0dbc79","#e5e510","#2472c8","#bc3fbc","#11a8cd","#e5e5e5","#666666","#f14c4c","#23d18b","#f5f543","#3b8eea","#d670d6","#29b8db","#ffffff"];
 function ansi256(n){if(n<16)return ANSI16[n];if(n<232){n-=16;const r=Math.floor(n/36),g=Math.floor((n%36)/6),b=n%6;const cv=v=>v===0?0:55+v*40;return`rgb(${cv(r)},${cv(g)},${cv(b)})`;}const gr=8+(n-232)*10;return`rgb(${gr},${gr},${gr})`;}
 function cellStyle(c){let s="";if(c.isFgRGB&&c.isFgRGB()){const fg=c.getFgColor();s+="color:#"+("000000"+fg.toString(16)).slice(-6)+";";}else if(c.isFgPalette&&c.isFgPalette())s+="color:"+ansi256(c.getFgColor())+";";if(c.isBgRGB&&c.isBgRGB()){const bg=c.getBgColor();s+="background:#"+("000000"+bg.toString(16)).slice(-6)+";";}else if(c.isBgPalette&&c.isBgPalette())s+="background:"+ansi256(c.getBgColor())+";";if(c.isBold&&c.isBold())s+="font-weight:bold;";if(c.isItalic&&c.isItalic())s+="font-style:italic;";if(c.isUnderline&&c.isUnderline())s+="text-decoration:underline;";if(c.isInverse&&c.isInverse())s+="filter:invert(1);";if(c.isDim&&c.isDim())s+="opacity:0.7;";return s;}
-function renderLogHTML(){const buf=term.buffer.active;const out=[];for(let i=0;i<buf.length;i++){const line=buf.getLine(i);if(!line){out.push("");continue;}let cur="",pend="",row="";const flush=()=>{if(!pend)return;if(cur)row+=`<span style="${cur}">${escapeHtml(pend)}</span>`;else row+=escapeHtml(pend);pend="";};for(let x=0;x<line.length;x++){const c=line.getCell(x);if(!c)continue;const ch=c.getChars()||" ";const st=cellStyle(c);if(st!==cur){flush();cur=st;}pend+=ch;}flush();out.push(row||" ");}return out.join("\n");}
+function renderLogHTML(){
+  const buf=term.buffer.active;
+  // Cursor position. xterm's IBuffer.cursorY is viewport-relative;
+  // adding viewportY gives the row index into the same coordinate
+  // space we iterate below.
+  const cursorRow = buf.viewportY + buf.cursorY;
+  const cursorX   = buf.cursorX;
+  const out=[];
+  for(let i=0;i<buf.length;i++){
+    const line=buf.getLine(i);
+    if(!line){out.push("");continue;}
+    const isCursorRow = (i === cursorRow);
+    let cur="",pend="",row="";
+    const flush=()=>{
+      if(!pend)return;
+      if(cur)row+=`<span style="${cur}">${escapeHtml(pend)}</span>`;
+      else row+=escapeHtml(pend);
+      pend="";
+    };
+    for(let x=0;x<line.length;x++){
+      if(isCursorRow && x===cursorX){
+        flush();
+        const c=line.getCell(x);
+        const ch=(c && c.getChars()) || " ";
+        row+=`<span class="cursor">${escapeHtml(ch)}</span>`;
+        cur="";
+        continue;
+      }
+      const c=line.getCell(x);
+      if(!c)continue;
+      const ch=c.getChars()||" ";
+      const st=cellStyle(c);
+      if(st!==cur){flush();cur=st;}
+      pend+=ch;
+    }
+    flush();
+    // Cursor at column == line width (one past the right margin) —
+    // append it as a trailing cell so the user still sees where they are.
+    if(isCursorRow && cursorX>=line.length){
+      row+=`<span class="cursor">${escapeHtml(" ")}</span>`;
+    }
+    out.push(row||" ");
+  }
+  return out.join("\n");
+}
 let renderPending = false;
 function scheduleLogRender() {
   if (renderPending) return;
@@ -735,6 +779,7 @@ function detach(reason) {
   hideLogLoader();
   updateSessionBar(null);
   if (reason) setStatus(reason);
+  if (typeof TPKeyboard !== "undefined") TPKeyboard.onSessionHidden();
   if (isMobile() && reason === "session ended") {
     localStorage.setItem(VIEW_KEY, "list"); applyLayout();
   }
@@ -981,18 +1026,12 @@ document.getElementById("inputform").addEventListener("submit", e => {
   document.getElementById("msg").value = "";
 });
 
-/* ===== Control bar (raw key sequences) ================================ */
-function parseKeys(s){return(s||"").replace(/\\x([0-9a-fA-F]{2})/g,(_,h)=>String.fromCharCode(parseInt(h,16))).replace(/\\r/g,"\r").replace(/\\n/g,"\n").replace(/\\t/g,"\t").replace(/\\e/g,"\x1b").replace(/\\\\/g,"\\");}
-document.querySelectorAll(".ctrl button").forEach(b => {
-  b.addEventListener("click", () => {
-    if (b.dataset.confirm && !window.confirm(b.dataset.confirm)) return;
-    const k = parseKeys(b.dataset.keys);
-    if (!k) return;
-    const bytes = new Uint8Array(k.length);
-    for (let i = 0; i < k.length; i++) bytes[i] = k.charCodeAt(i) & 0xff;
-    sendInputBytes(bytes);
-  });
-});
+/* ===== On-screen keyboard (favourites / groups / mod-latching) =========
+ *
+ * All keyboard logic lives in php/lib/keyboard.js. Here we just give
+ * it a bytes-sink (the existing sendInputBytes) and clear its state
+ * when the active session goes away. */
+if (typeof TPKeyboard !== "undefined") TPKeyboard.init({ sendBytes: sendInputBytes });
 
 document.getElementById("toggle-ctrl")?.addEventListener("click", () => {
   mainEl.classList.toggle("show-ctrl");

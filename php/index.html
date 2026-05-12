@@ -72,17 +72,14 @@
       </div>
     </div>
     <div id="term-host"></div>
-    <div class="ctrl">
-      <button data-keys="\x1b">Esc</button>
-      <button data-keys="\x03">Ctrl-C</button>
-      <button data-keys="\r">Enter</button>
-      <button data-keys="\x1b[A">↑</button>
-      <button data-keys="\x1b[B">↓</button>
-      <button data-keys="\x1b[D">←</button>
-      <button data-keys="\x1b[C">→</button>
-      <button data-keys="\x09">Tab</button>
-      <button data-keys="\x1b[Z">Sh-Tab</button>
-    </div>
+    <!-- Latched-modifier bar: visible only when one or more modifiers
+         are sticky (Ctrl, Alt, Shift, Super). Contents rendered by
+         keyboard.js. -->
+    <div class="kbd-latched" id="kbd-latched" hidden></div>
+    <!-- Keyboard strip: favourites row / groups row / in-group keys,
+         all driven by keyboard.js. The .ctrl class preserves the
+         existing mobile show/hide behaviour (`main.show-ctrl .ctrl`). -->
+    <div class="ctrl" id="kbd-strip"></div>
     <form id="inputform">
       <button type="button" class="icon mobile-only" id="toggle-ctrl" title="Toggle keyboard shortcuts">⌨</button>
       <input type="text" id="msg" placeholder="Type a message and press Enter — sent to the selected session" autocomplete="off" />
@@ -96,6 +93,7 @@
 <script src="./lib/vendor/xterm.min.js"></script>
 <script src="./lib/crypto.js"></script>
 <script src="./lib/session.js"></script>
+<script src="./lib/keyboard.js"></script>
 <script src="./lib/index.js" defer></script>
 </body>
 </html>
