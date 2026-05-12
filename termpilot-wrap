@@ -1,0 +1,1675 @@
+#!/usr/bin/env python3
+"""
+termpilot-wrap — termpilot wrapper, v2 (end-to-end encrypted).
+
+Subcommands:
+  generate-token   Generate a fresh 32-byte random token and save to keyring
+                   (or ~/.config/termpilot/token chmod 600 with warning if no keyring).
+                   Show the resulting token. Gated by sudo (anti-shoulder-surf).
+  show-token       Show the stored token. Gated by sudo.
+  help             Print usage.
+  run              Spawn a command in a PTY and bridge it to a remote relay,
+                   encrypting all traffic with the stored token. The command
+                   can be any interactive program (bash, tmux, htop, ...).
+                   This is what `termpilot` invokes.
+
+The wrapper trusts:
+  - The OS keyring (or a properly chmod'd token file).
+  - sudo as a "user is at the keyboard" gate for token operations.
+  - The PTY-spawned child process.
+
+The wrapper does NOT trust:
+  - The relay server. All metadata and content go ciphertext-only.
+  - The network. HTTPS plus AES-256-GCM with AAD bound to (stream, sid, seq).
+
+Run-mode threading:
+  output_uploader     batches PTY bytes, encrypts, POSTs in chunked records.
+  input_poller        long-polls for input records, decrypts, writes to PTY.
+  heartbeat           keeps the session alive on the relay (15s).
+"""
+from __future__ import annotations
+
+import argparse
+import base64
+import errno
+import fcntl
+import glob
+import hashlib
+import http.client
+import json
+import os
+import pty
+import queue
+import re
+import secrets
+import select
+import shlex
+import shutil
+import signal
+import ssl
+import struct
+import subprocess
+import sys
+import termios
+import threading
+import time
+import tty
+import urllib.error
+import urllib.request
+
+import socket  # noqa: F401  (urllib uses it; kept for clarity)
+
+# Make `lib/` importable regardless of cwd.
+SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
+sys.path.insert(0, SCRIPT_DIR)
+
+from lib import crypto, keystore  # noqa: E402
+
+
+# ============================================================================
+#  Resilience: cache layout, single-instance lock, active.json, output spool
+# ============================================================================
+#
+# All persistent state lives under ~/.cache/termpilot/, organised so
+# per-cwd things (lock + last-known sid for crash-recovery sid reuse) are
+# separate from per-sid things (the encrypted/POST queue spool).
+#
+#   ~/.cache/termpilot/
+#     cwd/<encoded-cwd>/
+#       wrapper.lock          fcntl LOCK_EX held by the running wrapper
+#       active.json           {wrapper_sid, ts, pid} — used for crash
+#                              recovery (sid reuse within 5 min of crash)
+#     sid/<sid>/
+#       out.spool             append-only [u32 len][plaintext bytes] entries
+#       out.cursor            uint64 LE byte offset; bytes before this have
+#                              been confirmed delivered to the relay
+#       out.next_seq          uint32 LE next AAD seq to assign at POST time
+#
+# Spool stores PLAINTEXT (not ciphertext). On the same machine the encryption
+# key is in the OS keyring (or ~/.config/termpilot/token), which is plaintext-equivalent
+# anyway, so the trust boundary is identical. Storing plaintext makes 409
+# resync trivial — we just re-encrypt with the relay's expected_seq. Mode
+# 0700 on the dir, 0600 on files; same as the keyring fallback.
+
+CACHE_BASE = os.path.expanduser("~/.cache/termpilot")
+
+# Structured event log. Always-on, one JSON record per line. Rotates to
+# .1 once it grows past EVENT_LOG_MAX_BYTES; older rotations are dropped.
+# Set TERMPILOT_DEBUG=1 to also mirror events to stderr in human-readable form.
+# Read with: `tail -f ~/.cache/termpilot/events.log` or
+#            `grep push_ ~/.cache/termpilot/events.log`
+EVENT_LOG = os.path.join(CACHE_BASE, "events.log")
+EVENT_LOG_MAX_BYTES = 256 * 1024
+
+
+def log_event(cat: str, **fields) -> None:
+    """Append a structured event. Best-effort; never raises."""
+    try:
+        os.makedirs(CACHE_BASE, mode=0o700, exist_ok=True)
+    except OSError:
+        return
+    try:
+        if os.path.exists(EVENT_LOG) and os.path.getsize(EVENT_LOG) > EVENT_LOG_MAX_BYTES:
+            rot = EVENT_LOG + ".1"
+            try: os.unlink(rot)
+            except OSError: pass
+            try: os.rename(EVENT_LOG, rot)
+            except OSError: pass
+    except OSError:
+        pass
+    rec = {
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + "Z",
+        "pid": os.getpid(),
+        "cat": cat,
+    }
+    rec.update(fields)
+    try:
+        line = json.dumps(rec, separators=(",", ":"), default=str) + "\n"
+    except Exception:
+        return
+    try:
+        with open(EVENT_LOG, "a") as f:
+            f.write(line)
+        try: os.chmod(EVENT_LOG, 0o600)
+        except OSError: pass
+    except OSError:
+        pass
+    if os.environ.get("TERMPILOT_DEBUG"):
+        try:
+            sys.stderr.write(f"[{cat}] " + ", ".join(f"{k}={v}" for k, v in fields.items()) + "\n")
+        except Exception:
+            pass
+
+
+def _encode_cwd(cwd: str) -> str:
+    # Hash rather than regex-collapse: the prior `re.sub("[^a-zA-Z0-9-]", "-", cwd)`
+    # was non-injective (cwds /a/b, /a-b, /a.b all mapped to "-a-b"), so two
+    # different working directories could share an active.json — leaking
+    # spool state from one project into another. SHA-256 truncated to 16
+    # hex chars gives 64-bit collision space; overkill for the universe
+    # of project paths a user has, but cheap.
+    return hashlib.sha256(cwd.encode("utf-8")).hexdigest()[:16]
+
+
+def cwd_cache_dir(cwd: str) -> str:
+    return os.path.join(CACHE_BASE, "cwd", _encode_cwd(cwd))
+
+
+def sid_cache_dir(sid: str) -> str:
+    return os.path.join(CACHE_BASE, "sid", sid)
+
+
+def acquire_wrapper_lock(cwd: str) -> int | None:
+    """fcntl LOCK_EX|LOCK_NB on <cwd-cache>/wrapper.lock. Returns the open
+    file descriptor (callers must keep it alive for the lifetime of the
+    process) or None if another process holds the lock.
+    """
+    d = cwd_cache_dir(cwd)
+    try:
+        os.makedirs(d, mode=0o700, exist_ok=True)
+        try: os.chmod(d, 0o700)
+        except OSError: pass
+    except OSError as e:
+        sys.stderr.write(f"termpilot: cannot create cache dir {d}: {e}\n")
+        return None
+    lock_path = os.path.join(d, "wrapper.lock")
+    # O_CLOEXEC: the pty-forked child must NOT inherit this fd.
+    # On Linux flock state is per-open-file-description, so a duplicate
+    # fd in the child keeps the lock alive — even after the wrapper
+    # exits via SIGKILL, the orphaned child (reparented to init) would
+    # keep the lock held until it eventually exits, blocking any new
+    # `termpilot` in the same cwd in the meantime.
+    #
+    # O_NOFOLLOW: refuse to open if lock_path is a symlink. The parent
+    # dir is mode 0700, so under normal use only this process's user
+    # could plant one — but on a system where the dir mode wasn't
+    # enforced this would otherwise hand a local attacker the ability
+    # to write the wrapper PID into a file of their choosing.
+    try:
+        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+    except OSError as e:
+        sys.stderr.write(f"termpilot: cannot open lock file {lock_path}: {e}\n")
+        return None
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        return None
+    # Record our PID inside the lock file as a debugging aid (the lock is
+    # advisory; this is just helpful when the user is diagnosing).
+    try:
+        os.ftruncate(fd, 0)
+        os.write(fd, f"{os.getpid()}\n".encode())
+    except OSError:
+        pass
+    return fd
+
+
+def release_wrapper_lock(fd: int | None) -> None:
+    if fd is None:
+        return
+    try:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    except OSError:
+        pass
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+
+
+def read_active_json(cwd: str) -> dict:
+    p = os.path.join(cwd_cache_dir(cwd), "active.json")
+    try:
+        with open(p, "r") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def write_active_json(cwd: str, **fields) -> None:
+    d = cwd_cache_dir(cwd)
+    try:
+        os.makedirs(d, mode=0o700, exist_ok=True)
+    except OSError:
+        return
+    p = os.path.join(d, "active.json")
+    obj = read_active_json(cwd)
+    obj.update(fields)
+    obj["ts"] = int(time.time())
+    obj["pid"] = os.getpid()
+    tmp = p + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(obj, f)
+            f.flush()
+            try: os.fsync(f.fileno())
+            except OSError: pass
+        os.replace(tmp, p)
+        try: os.chmod(p, 0o600)
+        except OSError: pass
+    except OSError:
+        pass
+
+
+def clear_active_json(cwd: str) -> None:
+    p = os.path.join(cwd_cache_dir(cwd), "active.json")
+    try:
+        os.unlink(p)
+    except OSError:
+        pass
+
+
+def cleanup_stale_sid_dirs(keep_sid: str, max_age_secs: int = 7 * 24 * 3600) -> None:
+    """Delete spool dirs older than max_age_secs (besides keep_sid). Non-fatal
+    on any error — this is housekeeping, not core function."""
+    base = os.path.join(CACHE_BASE, "sid")
+    if not os.path.isdir(base):
+        return
+    now = time.time()
+    try:
+        names = os.listdir(base)
+    except OSError:
+        return
+    for name in names:
+        if name == keep_sid:
+            continue
+        d = os.path.join(base, name)
+        try:
+            if now - os.path.getmtime(d) <= max_age_secs:
+                continue
+        except OSError:
+            continue
+        try:
+            shutil.rmtree(d)
+        except OSError:
+            pass
+
+
+class OutputSpool:
+    """Append-only durable queue of PTY chunks awaiting encryption + POST.
+
+    Survives wrapper SIGKILL between PTY-read and confirmed-POST: bytes
+    captured here are recoverable on next start as long as the same sid
+    is reused. Reusing a sid only happens on crash recovery (active.json
+    age < CRASH_RECOVERY_SECS); otherwise a fresh sid is assigned and the
+    old spool is left to be GC'd by cleanup_stale_sid_dirs.
+
+    Files (under sid_cache_dir(sid)):
+      <stream>.spool      append-only [uint32 LE len][plain_bytes] entries
+      <stream>.cursor     uint64 LE byte offset; bytes before confirmed sent
+      <stream>.next_seq   uint32 LE next AAD seq to assign at POST time
+
+    Threading: append/confirm_through/write_next_seq are called from the
+    single uploader thread. pending_chunks is called once at startup.
+    """
+    HDR = struct.Struct("<I")
+
+    def __init__(self, sid: str, stream: str):
+        d = sid_cache_dir(sid)
+        os.makedirs(d, mode=0o700, exist_ok=True)
+        try: os.chmod(d, 0o700)
+        except OSError: pass
+        self.sid = sid
+        self.stream = stream
+        self._spool_path = os.path.join(d, f"{stream}.spool")
+        self._cursor_path = os.path.join(d, f"{stream}.cursor")
+        self._seq_path = os.path.join(d, f"{stream}.next_seq")
+        if not os.path.exists(self._spool_path):
+            with open(self._spool_path, "wb"):
+                pass
+            try: os.chmod(self._spool_path, 0o600)
+            except OSError: pass
+        self._fh = open(self._spool_path, "ab")
+        self._fh.seek(0, 2)
+        self._size = self._fh.tell()
+
+    def append(self, plain: bytes) -> int:
+        """Write a plaintext chunk; return new spool size (== entry end offset)."""
+        self._fh.write(self.HDR.pack(len(plain)))
+        self._fh.write(plain)
+        self._fh.flush()
+        try: os.fsync(self._fh.fileno())
+        except OSError: pass
+        self._size += 4 + len(plain)
+        return self._size
+
+    def cursor(self) -> int:
+        try:
+            with open(self._cursor_path, "rb") as f:
+                d = f.read(8)
+            return int.from_bytes(d, "little") if len(d) == 8 else 0
+        except OSError:
+            return 0
+
+    def write_cursor(self, off: int) -> None:
+        tmp = self._cursor_path + ".tmp"
+        try:
+            with open(tmp, "wb") as f:
+                f.write(off.to_bytes(8, "little"))
+                f.flush()
+                try: os.fsync(f.fileno())
+                except OSError: pass
+            os.replace(tmp, self._cursor_path)
+            try: os.chmod(self._cursor_path, 0o600)
+            except OSError: pass
+        except OSError:
+            pass
+
+    def confirm_through(self, off: int) -> None:
+        if off > self.cursor():
+            self.write_cursor(off)
+
+    def next_seq(self) -> int:
+        try:
+            with open(self._seq_path, "rb") as f:
+                d = f.read(4)
+            return int.from_bytes(d, "little") if len(d) == 4 else 0
+        except OSError:
+            return 0
+
+    def write_next_seq(self, n: int) -> None:
+        tmp = self._seq_path + ".tmp"
+        try:
+            with open(tmp, "wb") as f:
+                f.write(n.to_bytes(4, "little"))
+                f.flush()
+                try: os.fsync(f.fileno())
+                except OSError: pass
+            os.replace(tmp, self._seq_path)
+            try: os.chmod(self._seq_path, 0o600)
+            except OSError: pass
+        except OSError:
+            pass
+
+    def pending_chunks(self) -> list[dict]:
+        """Read entries past cursor. Returns [{plain, end_off}, ...]."""
+        out: list[dict] = []
+        cur = self.cursor()
+        try:
+            with open(self._spool_path, "rb") as f:
+                f.seek(cur)
+                while True:
+                    h = f.read(4)
+                    if len(h) < 4:
+                        break
+                    n = self.HDR.unpack(h)[0]
+                    p = f.read(n)
+                    if len(p) < n:
+                        # Truncated tail (interrupted append). Discard.
+                        break
+                    end_off = f.tell()
+                    out.append({"plain": p, "end_off": end_off})
+        except OSError:
+            pass
+        return out
+
+    def truncate(self) -> None:
+        """Discard all spool contents. Cursor is reset to 0. Next-seq is
+        preserved (we don't want to recycle seqs; that would break the
+        relay's strict-order check)."""
+        try:
+            self._fh.close()
+        except OSError:
+            pass
+        try:
+            with open(self._spool_path, "wb"):
+                pass
+            try: os.chmod(self._spool_path, 0o600)
+            except OSError: pass
+        except OSError:
+            pass
+        self._fh = open(self._spool_path, "ab")
+        self._size = 0
+        self.write_cursor(0)
+
+    def close(self) -> None:
+        try: self._fh.close()
+        except OSError: pass
+
+
+# How long after a wrapper exits (or crashes) we still consider the previous
+# sid+spool "fresh enough" to reuse. Picked generously: a wrapper might be
+# offline for a few minutes during a network outage.
+CRASH_RECOVERY_SECS = 5 * 60
+
+
+# ============================================================================
+#  Subcommand: help
+# ============================================================================
+
+USAGE = """\
+termpilot — view and control any terminal over an encrypted relay.
+
+Setup (run once)
+  termpilot --set-relay-url URL          persist your relay's URL
+  termpilot --get-relay-url              print the configured relay URL
+  termpilot --set-relay-secret SECRET    persist the relay's Bearer token
+                                         (matches RELAY_SECRET in config.php)
+  termpilot --clear-relay-secret         forget the relay's Bearer token
+  termpilot --generate-token             create / replace your encryption token
+  termpilot --show-token                 reveal the stored token (gated by sudo)
+  termpilot --help                       this message
+
+Run
+  termpilot                          spawn $SHELL through the wrapper
+  termpilot -- bash                  spawn bash explicitly
+  termpilot -- tmux new -A -s main   persistent tmux session (survives detach)
+  termpilot -- htop                  any interactive program in a PTY
+
+Configuration files (under ~/.config/termpilot/)
+  relay-url        base URL of the relay deployment (set via --set-relay-url);
+                   the wrapper appends /relay.php itself
+  relay-secret     optional Bearer secret for the relay (set via
+                   --set-relay-secret, removed via --clear-relay-secret)
+  token            encryption token if no OS keyring is available
+
+Sudo gate:
+  Token-management commands ask for your sudo password (or use sudo's
+  cached timestamp). This is anti-shoulder-surf protection — the token
+  itself is just a 32-byte random secret in the keyring. There is no
+  separate password to remember.
+
+Token storage:
+  Tokens are stored in your OS keyring when available (GNOME Keyring on
+  Linux, Keychain on macOS, Credential Store on Windows). If no keyring
+  is found, the wrapper falls back to ~/.config/termpilot/token (chmod 600) and prints
+  a warning.
+"""
+
+
+def cmd_help(args):
+    sys.stdout.write(USAGE)
+    return 0
+
+
+# ============================================================================
+#  Sudo gate (anti-shoulder-surf, NOT cryptographic)
+# ============================================================================
+
+
+def require_sudo() -> bool:
+    """Authenticate via sudo. Uses sudo's timestamp cache, so the user is
+    only prompted once per cache window. This gate is purely a UX-level
+    "you have to be at the keyboard" check; it doesn't strengthen the
+    encryption (the token is just a random secret in the keyring)."""
+    try:
+        # `sudo -v` validates / refreshes the timestamp. Prompts if expired.
+        # We inherit stdio so the user sees the prompt and types directly.
+        rc = subprocess.run(
+            ["sudo", "-v"],
+            stdin=sys.stdin, stdout=sys.stderr, stderr=sys.stderr,
+        ).returncode
+        return rc == 0
+    except FileNotFoundError:
+        sys.stderr.write("error: sudo not found on this system; can't gate the operation\n")
+        return False
+
+
+def _confirm(prompt: str, default_no: bool = True) -> bool:
+    suffix = "[y/N]" if default_no else "[Y/n]"
+    while True:
+        sys.stderr.write(f"{prompt} {suffix} ")
+        sys.stderr.flush()
+        line = sys.stdin.readline().strip().lower()
+        if not line:
+            return not default_no
+        if line in ("y", "yes"): return True
+        if line in ("n", "no"):  return False
+
+
+# ============================================================================
+#  Token display helpers
+# ============================================================================
+
+
+def _qrencode_install_command() -> list[str] | None:
+    """Return the platform-appropriate install command for qrencode,
+    or None if we don't have a known recipe for this system."""
+    if sys.platform == "darwin":
+        if shutil.which("brew"):
+            return ["brew", "install", "qrencode"]
+        return None
+    if sys.platform.startswith("linux"):
+        if shutil.which("apt-get"):
+            return ["sudo", "apt-get", "install", "-y", "qrencode"]
+        if shutil.which("dnf"):
+            return ["sudo", "dnf", "install", "-y", "qrencode"]
+        if shutil.which("pacman"):
+            return ["sudo", "pacman", "-S", "--noconfirm", "qrencode"]
+    return None
+
+
+def _offer_install_qrencode() -> str | None:
+    """If qrencode is missing, explain what it's for and offer to install
+    it. Returns the resolved qrencode path on success, or None to skip
+    rendering the QR."""
+    install_cmd = _qrencode_install_command()
+    if install_cmd is None:
+        sys.stdout.write(
+            "(install `qrencode` for a scannable QR — package "
+            "`qrencode` in your distro's repos)\n\n"
+        )
+        return None
+    sys.stdout.write(
+        "`qrencode` is not installed. With it, termpilot can render the\n"
+        "token above as a scannable QR code — handy for moving the token\n"
+        "onto another device (a phone scanner in the web UI is planned).\n"
+    )
+    sys.stdout.write(f"Install command: {' '.join(install_cmd)}\n")
+    if not _confirm("Install qrencode now?", default_no=False):
+        sys.stdout.write("\n")
+        return None
+    try:
+        rc = subprocess.call(install_cmd)
+    except OSError as e:
+        sys.stderr.write(f"install failed: {e}\n\n")
+        return None
+    if rc != 0:
+        sys.stderr.write(f"install command exited with code {rc}; skipping QR.\n\n")
+        return None
+    qrencode = shutil.which("qrencode")
+    if qrencode is None:
+        sys.stderr.write("qrencode still not on PATH after install; skipping QR.\n\n")
+        return None
+    sys.stdout.write("\n")
+    return qrencode
+
+
+def _render_qr_truecolor(hex_str: str, qrencode_path: str) -> str | None:
+    """Render a scannable QR on stdout using 24-bit color escapes.
+
+    qrencode's `-t ANSIUTF8` uses 8-color ANSI (`\\e[40m` / `\\e[47m`),
+    which many terminal themes remap to theme-fg / theme-bg. On a dark
+    theme that often makes the quiet zone the same colour as the
+    terminal background, so phone QR readers see no margin around the
+    finder patterns and stricter decoders (notably jsQR in the web UI)
+    fail to lock on. We instead pull the raw matrix via `-t ASCII`,
+    then re-emit it with explicit `\\e[38;2;R;G;Bm` / `\\e[48;2;R;G;Bm`
+    so it renders pure black-on-white regardless of the active theme.
+    Uses the upper-half-block char `▀` to fit two QR rows per terminal
+    line — same compact aspect ratio as ANSIUTF8.
+    """
+    try:
+        r = subprocess.run(
+            [qrencode_path, "-t", "ASCII", "-m", "4", "-l", "H", hex_str],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0 or not r.stdout:
+        return None
+
+    # ASCII output: 2 chars per QR module ('##' dark, '  ' light).
+    rows: list[list[bool]] = []
+    for line in r.stdout.splitlines():
+        if not line:
+            continue
+        width_mod = len(line) // 2
+        row = [line[i * 2] != " " for i in range(width_mod)]
+        if row:
+            rows.append(row)
+    if not rows:
+        return None
+
+    width = len(rows[0])
+    if len(rows) % 2 != 0:
+        rows.append([False] * width)
+
+    BLACK = "0;0;0"
+    WHITE = "255;255;255"
+
+    out_lines: list[str] = []
+    for i in range(0, len(rows), 2):
+        top, bot = rows[i], rows[i + 1]
+        parts: list[str] = []
+        last_pair: tuple[str, str] | None = None
+        for c in range(width):
+            fg = BLACK if top[c] else WHITE
+            bg = BLACK if bot[c] else WHITE
+            pair = (fg, bg)
+            if pair != last_pair:
+                parts.append(f"\033[38;2;{fg};48;2;{bg}m")
+                last_pair = pair
+            parts.append("▀")
+        parts.append("\033[0m")
+        out_lines.append("".join(parts))
+    return "\n".join(out_lines) + "\n"
+
+
+def _print_token_qr(hex_str: str):
+    """Render the token as a scannable QR on stdout when possible.
+
+    Skips when stdout isn't a TTY (piping/redirection shouldn't see ANSI
+    escapes). When `qrencode` isn't present, offers to install it via
+    the platform package manager.
+    """
+    if not sys.stdout.isatty():
+        return
+    qrencode = shutil.which("qrencode") or _offer_install_qrencode()
+    if qrencode is None:
+        return
+    rendered = _render_qr_truecolor(hex_str, qrencode)
+    if rendered is None:
+        return
+    sys.stdout.write(rendered)
+    sys.stdout.write("\n")
+
+
+# ============================================================================
+#  Subcommand: generate-token
+# ============================================================================
+
+
+def cmd_generate_token(args):
+    if keystore.has_token():
+        sys.stderr.write("A token already exists.\n")
+        if not _confirm("Overwrite it? Existing sessions will be unreadable."):
+            sys.stderr.write("aborted; existing token preserved.\n")
+            return 1
+    if not require_sudo():
+        sys.stderr.write("authentication failed; aborting\n")
+        return 3
+
+    token = secrets.token_bytes(crypto.TOKEN_BYTES)
+    backend = keystore.save_token(token)
+
+    hex_str = crypto.token_to_hex(token)
+    sys.stdout.write("\n")
+    sys.stdout.write(f"Token (saved in {backend}):\n")
+    sys.stdout.write(f"  {hex_str}\n\n")
+    _print_token_qr(hex_str)
+    sys.stdout.write("Copy this into the web UI's 'manage tokens' panel.\n")
+    sys.stdout.write("Show it again later with:\n")
+    sys.stdout.write("  termpilot --show-token\n")
+    return 0
+
+
+# ============================================================================
+#  Subcommand: show-token
+# ============================================================================
+
+
+def cmd_show_token(args):
+    stored = keystore.load_token()
+    if stored is None:
+        sys.stderr.write(
+            "No token stored. Run `termpilot --generate-token` to create one.\n"
+        )
+        return 1
+    if not require_sudo():
+        sys.stderr.write("authentication failed; aborting\n")
+        return 3
+
+    hex_str = crypto.token_to_hex(stored)
+    sys.stdout.write("\n")
+    sys.stdout.write(f"Token (from {keystore.backend_in_use()}):\n")
+    sys.stdout.write(f"  {hex_str}\n\n")
+    _print_token_qr(hex_str)
+    return 0
+
+
+# ============================================================================
+#  Subcommands: set-relay-url, get-relay-url
+# ============================================================================
+#
+# Persist the relay URL at ~/.config/termpilot/relay-url so the user
+# doesn't have to keep passing $TERMPILOT_RELAY. The shell function reads this
+# file and exports TERMPILOT_RELAY for the run subcommand. Plain text, mode
+# 0644 — the URL itself isn't secret (the bearer secret lives in
+# relay-secret with mode 0600, separately).
+
+RELAY_URL_FILE = os.path.expanduser("~/.config/termpilot/relay-url")
+
+
+def _validate_relay_url(url: str) -> str | None:
+    """Return None if the URL looks plausible, else an error message."""
+    s = (url or "").strip()
+    if not s:
+        return "URL cannot be empty"
+    if not (s.startswith("http://") or s.startswith("https://")):
+        return "URL must start with http:// or https://"
+    if " " in s or "\n" in s:
+        return "URL must not contain whitespace"
+    return None
+
+
+def _normalize_relay_base(url: str) -> str:
+    """Strip a trailing /relay.php (or /relay.php/) and any trailing slash so
+    the stored value is always the directory holding relay.php.
+    Accepts either form from --set-relay-url, --relay, or $TERMPILOT_RELAY."""
+    s = (url or "").strip().rstrip("/")
+    if s.endswith("/relay.php"):
+        s = s[: -len("/relay.php")]
+    return s
+
+
+def _relay_endpoints(base: str) -> tuple[str, str]:
+    """Given a normalized base URL, return (relay_url, transcript_url).
+
+    transcript.php was retired when the chat view was merged into the
+    terminal view; the returned transcript_url is unused and kept only
+    so the tuple shape doesn't churn through every call site."""
+    base = base.rstrip("/")
+    return base + "/relay.php", base + "/relay.php"
+
+
+def cmd_set_relay_url(args):
+    if not args:
+        sys.stderr.write(
+            "Usage: termpilot --set-relay-url <https://your.host/path>\n"
+        )
+        return 2
+    url = _normalize_relay_base(args[0])
+    err = _validate_relay_url(url)
+    if err:
+        sys.stderr.write(f"termpilot: bad URL — {err}\n")
+        return 2
+    d = os.path.dirname(RELAY_URL_FILE)
+    try:
+        os.makedirs(d, mode=0o700, exist_ok=True)
+    except OSError as e:
+        sys.stderr.write(f"termpilot: cannot create {d}: {e}\n")
+        return 1
+    tmp = RELAY_URL_FILE + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            f.write(url + "\n")
+        os.replace(tmp, RELAY_URL_FILE)
+        try: os.chmod(RELAY_URL_FILE, 0o644)
+        except OSError: pass
+    except OSError as e:
+        sys.stderr.write(f"termpilot: cannot write {RELAY_URL_FILE}: {e}\n")
+        return 1
+    sys.stdout.write(f"Saved {RELAY_URL_FILE}: {url}\n")
+    return 0
+
+
+def cmd_get_relay_url(args):
+    try:
+        with open(RELAY_URL_FILE, "r") as f:
+            url = f.read().strip()
+    except OSError:
+        sys.stderr.write(
+            "No relay URL configured.\n"
+            "Set one with:\n"
+            "  termpilot --set-relay-url https://your.host/path\n"
+        )
+        return 1
+    if not url:
+        sys.stderr.write("Relay URL file exists but is empty.\n")
+        return 1
+    sys.stdout.write(url + "\n")
+    return 0
+
+
+# ============================================================================
+#  Subcommands: set-relay-secret, clear-relay-secret
+# ============================================================================
+#
+# The "server secret" is the relay's Bearer token (RELAY_SECRET in
+# config.php) — an HTTP gate against drive-by spam. Distinct from the
+# device encryption token. Stored at ~/.config/termpilot/relay-secret
+# with mode 0600; the wrapper refuses to read it if perms are looser.
+
+SECRET_FILE = os.path.expanduser("~/.config/termpilot/relay-secret")
+
+
+def cmd_set_relay_secret(args):
+    if not args or not args[0]:
+        sys.stderr.write(
+            "Usage: termpilot --set-relay-secret <SECRET>\n"
+            "  The value must match RELAY_SECRET in your config.php.\n"
+        )
+        return 2
+    secret = args[0].strip()
+    if not secret:
+        sys.stderr.write("termpilot: secret cannot be empty\n")
+        return 2
+    if any(c.isspace() for c in secret):
+        sys.stderr.write("termpilot: secret must not contain whitespace\n")
+        return 2
+    d = os.path.dirname(SECRET_FILE)
+    try:
+        os.makedirs(d, mode=0o700, exist_ok=True)
+        try: os.chmod(d, 0o700)
+        except OSError: pass
+    except OSError as e:
+        sys.stderr.write(f"termpilot: cannot create {d}: {e}\n")
+        return 1
+    tmp = SECRET_FILE + ".tmp"
+    try:
+        # Write via os.open with O_CREAT|O_WRONLY|O_TRUNC mode 0600 so the
+        # file is never world/group-readable, even briefly.
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+        try:
+            os.write(fd, secret.encode("utf-8"))
+        finally:
+            os.close(fd)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, SECRET_FILE)
+        os.chmod(SECRET_FILE, 0o600)
+    except OSError as e:
+        try: os.unlink(tmp)
+        except OSError: pass
+        sys.stderr.write(f"termpilot: cannot write {SECRET_FILE}: {e}\n")
+        return 1
+    sys.stdout.write(f"Saved {SECRET_FILE} (chmod 600).\n")
+    return 0
+
+
+def cmd_clear_relay_secret(args):
+    try:
+        os.unlink(SECRET_FILE)
+        sys.stdout.write(f"Removed {SECRET_FILE}.\n")
+        return 0
+    except FileNotFoundError:
+        sys.stdout.write(f"No secret file at {SECRET_FILE} — nothing to do.\n")
+        return 0
+    except OSError as e:
+        sys.stderr.write(f"termpilot: cannot remove {SECRET_FILE}: {e}\n")
+        return 1
+
+
+# ============================================================================
+#  Subcommand: run  — the main wrapper
+# ============================================================================
+
+
+def parse_run_args(argv):
+    p = argparse.ArgumentParser(prog="termpilot", add_help=False, allow_abbrev=False)
+    p.add_argument("--relay", default=os.environ.get("TERMPILOT_RELAY"))
+    p.add_argument("--auth", default=None,
+                   help="Bearer secret for the relay (fallback: $TERMPILOT_SECRET, "
+                        "then ~/.config/termpilot/relay-secret).")
+    p.add_argument("--title", default=None)
+    p.add_argument("--no-local", action="store_true")
+    p.add_argument("--insecure", action="store_true",
+                   help="skip TLS cert verification (for local dev with php -S)")
+    p.add_argument("--force", action="store_true",
+                   help="run even if another wrapper appears to hold the per-cwd lock")
+    p.add_argument("-h", "--help", action="store_true")
+    args, rest = p.parse_known_args(argv)
+    if rest and rest[0] == "--":
+        rest = rest[1:]
+    return args, rest
+
+
+def _resolve_auth_secret(arg_value: str | None) -> str | None:
+    if arg_value:
+        return arg_value
+    env = os.environ.get("TERMPILOT_SECRET")
+    if env:
+        return env
+    p = SECRET_FILE
+    if not os.path.exists(p):
+        return None
+    # Sanity-check perms — the README tells users to chmod 600, but if
+    # the file came through `cp -p` from a world-readable source the
+    # secret leaks. Refuse to load it loose; tell the user how to fix.
+    try:
+        st = os.stat(p)
+    except OSError:
+        return None
+    import stat as _stat
+    if st.st_mode & (_stat.S_IRWXG | _stat.S_IRWXO):
+        sys.stderr.write(
+            f"WARNING: {p} has loose permissions "
+            f"({oct(_stat.S_IMODE(st.st_mode))}); refusing to load. "
+            f"Run: chmod 600 {p}\n"
+        )
+        return None
+    try:
+        return open(p).read().strip()
+    except OSError:
+        return None
+
+
+def get_winsize(fd: int) -> bytes:
+    try:
+        return fcntl.ioctl(fd, termios.TIOCGWINSZ, b"\0" * 8)
+    except OSError:
+        return struct.pack("HHHH", 24, 80, 0, 0)
+
+
+def set_winsize(fd: int, ws: bytes) -> None:
+    try:
+        fcntl.ioctl(fd, termios.TIOCSWINSZ, ws)
+    except OSError:
+        pass
+
+
+def cols_rows_of(fd: int) -> tuple[int, int]:
+    try:
+        ws = fcntl.ioctl(fd, termios.TIOCGWINSZ, b"\0" * 8)
+        rows, cols, _, _ = struct.unpack("HHHH", ws)
+        return (cols if cols > 0 else 80, rows if rows > 0 else 24)
+    except OSError:
+        return (80, 24)
+
+
+# ---- HTTP client ---------------------------------------------------------
+
+
+class Backoff:
+    """Bounded exponential backoff with reset-on-success. Used by the
+    uploader and input-poller threads so a relay that's been hard-down
+    for hours doesn't get hammered at ~2 req/s/session.
+
+    The cap (60s) is short enough that wrapper recovery still feels
+    snappy once the relay returns; the floor (0.5s) preserves the
+    original retry cadence for transient blips.
+    """
+    def __init__(self, base: float = 0.5, cap: float = 60.0):
+        self.base = base
+        self.cap = cap
+        self._d = base
+
+    def sleep(self):
+        d = self._d
+        time.sleep(d)
+        self._d = min(self.cap, d * 2.0)
+
+    def reset(self):
+        self._d = self.base
+
+
+def _happy_eyeballs_create_connection(address, timeout=None):
+    """RFC 8305-lite happy-eyeballs TCP connect.
+
+    Races every getaddrinfo result in parallel (IPv6 first, IPv4 staggered
+    by 250ms) and returns the first socket that completes the TCP
+    handshake. Without this, Python's stock socket.create_connection
+    iterates addresses serially with the full per-address timeout — so a
+    relay that publishes both A and AAAA but is unreachable over IPv6
+    burns the entire register timeout (~15s) in dead silence before
+    falling back to IPv4. The wrapper has no output until register
+    returns, so the user sees nothing and concludes the tool is broken.
+    """
+    host, port = address
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except socket.gaierror as e:
+        raise OSError(f"DNS lookup failed for {host}: {e}") from e
+    if not infos:
+        raise OSError(f"no addresses for {host}:{port}")
+    if len(infos) == 1:
+        return socket.create_connection(address, timeout=timeout)
+    infos = sorted(infos, key=lambda x: 0 if x[0] == socket.AF_INET6 else 1)
+    result_q: "queue.Queue" = queue.Queue()
+    cancel = threading.Event()
+    per_attempt = timeout if timeout is not None else 30.0
+
+    def _try(info, delay):
+        if delay and cancel.wait(delay):
+            return
+        af, st, proto, _, sa = info
+        s = None
+        try:
+            s = socket.socket(af, st, proto)
+            s.settimeout(per_attempt)
+            s.connect(sa)
+            if cancel.is_set():
+                s.close()
+                return
+            result_q.put(("ok", s))
+        except Exception as e:
+            if s is not None:
+                try: s.close()
+                except Exception: pass
+            result_q.put(("err", e))
+
+    for i, info in enumerate(infos):
+        threading.Thread(
+            target=_try, args=(info, i * 0.25), daemon=True,
+        ).start()
+
+    deadline = time.monotonic() + per_attempt
+    errors = []
+    pending = len(infos)
+    while pending > 0:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            kind, payload = result_q.get(timeout=remaining)
+        except queue.Empty:
+            break
+        if kind == "ok":
+            cancel.set()
+            sock = payload
+            if timeout is not None:
+                sock.settimeout(timeout)
+            return sock
+        errors.append(payload)
+        pending -= 1
+    cancel.set()
+    if errors:
+        raise errors[-1]
+    raise TimeoutError("happy_eyeballs: no address connected within timeout")
+
+
+class _HEHTTPSConnection(http.client.HTTPSConnection):
+    """HTTPSConnection that uses happy-eyeballs for the TCP step."""
+    def connect(self):
+        sock = _happy_eyeballs_create_connection(
+            (self.host, self.port), timeout=self.timeout,
+        )
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except OSError:
+            pass
+        if self._tunnel_host:
+            self.sock = sock
+            self._tunnel()
+            sock = self.sock
+            server_hostname = self._tunnel_host
+        else:
+            server_hostname = self.host
+        self.sock = self._context.wrap_socket(
+            sock, server_hostname=server_hostname,
+        )
+
+
+class _HEHTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, req):
+        return self.do_open(_HEHTTPSConnection, req, context=self._context)
+
+
+class Relay:
+    # Cap responses to 16 MB. The legit ceiling is a single long-poll
+    # batch (records[] up to ~25 entries × 256 KB after b64+JSON ≈ 8 MB).
+    # Without this cap, a hostile or buggy relay could OOM the wrapper
+    # by returning an unbounded body.
+    MAX_RESPONSE_BYTES = 16 * 1024 * 1024
+
+    def __init__(self, base: str, secret: str, insecure: bool = False):
+        self.base = base.rstrip("?")
+        self.secret = secret
+        self.ctx = ssl._create_unverified_context() if insecure else ssl.create_default_context()
+        # Custom opener so all relay HTTPS traffic goes through
+        # happy-eyeballs. Built once per Relay; reused for the lifetime
+        # of the wrapper. urllib.build_opener won't add a second
+        # HTTPSHandler when one is already supplied.
+        self._opener = urllib.request.build_opener(_HEHTTPSHandler(context=self.ctx))
+
+    def _url(self, op: str, **params):
+        from urllib.parse import urlencode
+        q = {"op": op, **{k: str(v) for k, v in params.items() if v is not None}}
+        sep = "&" if "?" in self.base else "?"
+        return f"{self.base}{sep}{urlencode(q)}"
+
+    def request(self, method: str, op: str, *, params=None, body=None, timeout=30.0):
+        url = self._url(op, **(params or {}))
+        data = json.dumps(body).encode() if body is not None else None
+        req = urllib.request.Request(url, data=data, method=method)
+        if self.secret:
+            req.add_header("Authorization", f"Bearer {self.secret}")
+        if data is not None:
+            req.add_header("Content-Type", "application/json")
+        with self._opener.open(req, timeout=timeout) as r:
+            raw = r.read(self.MAX_RESPONSE_BYTES + 1)
+            if len(raw) > self.MAX_RESPONSE_BYTES:
+                raise RuntimeError(f"relay response > {self.MAX_RESPONSE_BYTES} bytes")
+            return json.loads(raw.decode("utf-8"))
+
+
+def _print_startup_banner(sid: str, spool_count: int, spool_bytes: int) -> None:
+    """One consolidated header before the spawned program takes over the TTY."""
+    DIM = "\033[2m"
+    RESET = "\033[0m"
+    TITLE = "\033[1;36m"
+    pad = " " * len("termpilot ")
+    lines = [f"{TITLE}termpilot{RESET} {DIM}session {RESET}{sid}"]
+    if spool_count:
+        lines.append(
+            f"{pad}{DIM}spool   {RESET}replaying {spool_count} chunk(s) "
+            f"({spool_bytes} bytes)"
+        )
+    sys.stderr.write("\n".join(lines) + "\n")
+
+
+def cmd_run(argv):
+    args, cmd = parse_run_args(argv)
+    # Fall back to ~/.config/termpilot/relay-url if neither --relay nor
+    # $TERMPILOT_RELAY was provided. Lets the binary stand alone without the
+    # shell function priming TERMPILOT_RELAY.
+    if not args.relay:
+        try:
+            with open(RELAY_URL_FILE, "r") as f:
+                stored = f.read().strip()
+            if stored:
+                args.relay = stored
+        except OSError:
+            pass
+    if args.help or not cmd or not args.relay:
+        sys.stderr.write(USAGE)
+        if not args.relay:
+            sys.stderr.write(
+                "\nerror: relay URL not configured.\n"
+                "  Set one with:  termpilot --set-relay-url https://your.host/path\n"
+                "  Or pass:       --relay <url> (or $TERMPILOT_RELAY)\n"
+            )
+        return 2
+
+    # Accept either form for backwards-compat with old config files,
+    # $TERMPILOT_RELAY values, and --relay flags that still carry /relay.php.
+    relay_base = _normalize_relay_base(args.relay)
+    relay_url, _transcript_url = _relay_endpoints(relay_base)
+
+    auth_secret = _resolve_auth_secret(args.auth) or ""
+
+    # TERMPILOT_TOKEN_HEX env var is an explicit override for tests / scripted use.
+    # Production users go through the keyring or ~/.config/termpilot/token.
+    env_hex = os.environ.get("TERMPILOT_TOKEN_HEX")
+    if env_hex:
+        try:
+            token = crypto.hex_to_token(env_hex)
+        except Exception as e:
+            sys.stderr.write(f"TERMPILOT_TOKEN_HEX invalid: {e}\n")
+            return 2
+    else:
+        token = keystore.load_token()
+    if token is None:
+        sys.stderr.write(
+            "No token. Run `termpilot --generate-token` to create one,\n"
+            "then `termpilot --show-token` to copy it to the web UI.\n"
+        )
+        return 2
+    crypto_obj = crypto.Crypto(token)
+    # SHA-256(token) as hex — shared identifier with the browser. Used to
+    # bind push subscriptions on the relay (which never sees the token
+    # itself, only the hash). Computed once and forgotten in this scope.
+    token_hash_hex = hashlib.sha256(token).hexdigest()
+    # Trigger secret/id: see lib/crypto.py:derive_trigger_secret. The
+    # secret authenticates op_close (per-sid) and op_push_notify
+    # (per-token-hash); the id is the public verifier the relay stores
+    # at register / first push_subscribe. Both are token-derived, so
+    # only an entity that has the device token can produce a valid
+    # secret — RELAY_SECRET alone is insufficient.
+    trigger_secret_hex = crypto.derive_trigger_secret(token).hex()
+    trigger_id_hex = crypto.trigger_id_for(token).hex()
+
+    cwd = os.getcwd()
+
+    # ---- Resilience: per-cwd lock, then decide sid + (maybe) --resume splice.
+    lock_fd = acquire_wrapper_lock(cwd)
+    if lock_fd is None and not args.force:
+        sys.stderr.write(
+            f"termpilot: another wrapper appears to be running in {cwd}.\n"
+            "  Close it first, or pass --force to override.\n"
+        )
+        return 4
+    if lock_fd is None:
+        sys.stderr.write("termpilot: --force given; proceeding without an exclusive lock\n")
+
+    active = read_active_json(cwd)
+    now_ts = int(time.time())
+    prev_sid = active.get("wrapper_sid") or None
+    prev_marker_b64 = active.get("marker_b64") or None
+    prev_age = now_ts - int(active.get("ts") or 0) if active.get("ts") else None
+
+    sid = None
+    if (prev_sid and prev_age is not None and 0 <= prev_age <= CRASH_RECOVERY_SECS
+            and os.path.isdir(sid_cache_dir(prev_sid))):
+        sid = prev_sid
+    # Crash-recovery: we must re-POST the byte-identical marker we sent
+    # last time. AES-GCM uses a random nonce per call, so encrypting
+    # b"termpilot:v1" again would produce a different ciphertext and the relay
+    # would 409 ("session exists with different marker"). If the cached
+    # marker is missing for some reason, abandon recovery and take a
+    # fresh sid — fail open into a working state rather than spinning
+    # on 409s.
+    if sid is not None and not prev_marker_b64:
+        log_event("recovery_no_marker", prev_sid=prev_sid)
+        sid = None
+    if sid is None:
+        sid = os.urandom(6).hex()  # 12 hex chars
+        prev_marker_b64 = None  # don't reuse a marker tied to a different sid
+
+    cleanup_stale_sid_dirs(keep_sid=sid)
+
+    log_event("wrapper_start", sid=sid, prev_sid=prev_sid,
+              prev_age_s=prev_age, cwd_short=os.path.basename(cwd))
+
+    # Output spool: encryption queue with crash-resilient on-disk journal.
+    out_spool = OutputSpool(sid, "out")
+    spool_pending = out_spool.pending_chunks()
+    spool_pending_bytes = sum(len(p["plain"]) for p in spool_pending)
+
+    title = args.title or (cmd[0] if cmd else "session")
+    relay = Relay(relay_url, auth_secret, insecure=args.insecure)
+
+    # Early stderr line so a slow register (e.g. a relay that takes a
+    # few seconds to respond, or a network where one IP family is
+    # broken even with happy-eyeballs in place) doesn't look like a
+    # silent hang. Replaced by the proper banner once register returns.
+    sys.stderr.write(f"\033[2mtermpilot: connecting to {relay_url}…\033[0m\n")
+    sys.stderr.flush()
+
+    # ---- Register: encrypt meta + marker, ship public_meta as plaintext.
+    cmd_str = shlex.join(cmd)
+    init_cols, init_rows = cols_rows_of(sys.stdout.fileno()) if os.isatty(sys.stdout.fileno()) else (100, 30)
+
+    meta_plain = json.dumps({
+        "title": title, "cwd": cwd, "cmd": cmd_str,
+        "cols": init_cols, "rows": init_rows,
+    }).encode("utf-8")
+
+    enc_meta_b64 = crypto_obj.encrypt_b64(meta_plain, crypto.aad_meta(sid))
+    # Use the cached marker on crash-recovery, otherwise mint a fresh one.
+    # See the "Crash-recovery" block above for why this is byte-identical.
+    if prev_marker_b64:
+        enc_marker_b64 = prev_marker_b64
+    else:
+        enc_marker_b64 = crypto_obj.encrypt_b64(b"termpilot:v1", crypto.aad_marker(sid))
+
+    try:
+        reg = relay.request("POST", "register", body={
+            "session_id": sid,
+            "encrypted_meta": enc_meta_b64,
+            "encrypted_marker": enc_marker_b64,
+            "trigger_id_hex": trigger_id_hex,
+            # public_meta — ONLY what the server legitimately needs to operate.
+            "cols": init_cols, "rows": init_rows,
+        }, timeout=15)
+    except (urllib.error.URLError, urllib.error.HTTPError) as e:
+        sys.stderr.write(f"termpilot: register failed: {e}\n")
+        release_wrapper_lock(lock_fd)
+        return 1
+    if reg.get("session_id") != sid:
+        sys.stderr.write(f"termpilot: register returned unexpected sid {reg}\n")
+        release_wrapper_lock(lock_fd)
+        return 1
+    _print_startup_banner(sid, len(spool_pending), spool_pending_bytes)
+
+    # Persist our wrapper_sid (and the marker we successfully registered
+    # with) so a subsequent crash-restart can pick up the spool and
+    # re-POST the same marker bytes.
+    write_active_json(cwd, wrapper_sid=sid, marker_b64=enc_marker_b64)
+
+    pid, master = pty.fork()
+    if pid == 0:
+        # Scrub wrapper-only env from the spawned subprocess. TERMPILOT_TOKEN_HEX
+        # is documented as test-only but pty.fork()+execvp inherits the
+        # full env, which would expose the token to anything the child
+        # later spawns. TERMPILOT_SECRET and TERMPILOT_RELAY similarly leak relay
+        # credentials. Best-effort: a hostile env-reader before this point
+        # still loses (the wrapper hasn't yet handed control over).
+        for _v in ("TERMPILOT_TOKEN_HEX", "TERMPILOT_SECRET", "TERMPILOT_RELAY"):
+            os.environ.pop(_v, None)
+        try:
+            os.execvp(cmd[0], cmd)
+        except OSError as e:
+            sys.stderr.write(f"termpilot: exec {cmd[0]} failed: {e}\n")
+            os._exit(127)
+
+    stdin_fd = sys.stdin.fileno()
+    stdout_fd = sys.stdout.fileno()
+    is_tty_in = os.isatty(stdin_fd) and not args.no_local
+
+    if os.isatty(stdout_fd):
+        set_winsize(master, get_winsize(stdout_fd))
+
+    def on_winch(signum, frame):
+        if os.isatty(stdout_fd):
+            ws = get_winsize(stdout_fd)
+            set_winsize(master, ws)
+            rows, cols, _, _ = struct.unpack("HHHH", ws)
+            # Push public size to the relay so browsers can match xterm cols.
+            threading.Thread(target=lambda: _safely(
+                relay.request, "POST", "resize",
+                body={"session_id": sid, "cols": cols, "rows": rows},
+                timeout=5,
+            ), daemon=True).start()
+            try: os.kill(pid, signal.SIGWINCH)
+            except ProcessLookupError: pass
+
+    signal.signal(signal.SIGWINCH, on_winch)
+
+    # Trip on terminal close (SIGHUP) or `kill <wrapperpid>` (SIGTERM)
+    # so the main loop drops out cleanly and the finally clause gets to
+    # POST ?op=close. Without this, Python's default for SIGHUP is to
+    # terminate the process outright — `finally` never runs, the relay
+    # never hears the session ended, and the browser keeps showing a
+    # greyed "offline" pill until the alive TTL eventually expires.
+    shutdown_requested = threading.Event()
+
+    def _on_term_signal(signum, frame):
+        shutdown_requested.set()
+
+    for _term_sig in (signal.SIGHUP, signal.SIGTERM):
+        try:
+            signal.signal(_term_sig, _on_term_signal)
+        except (ValueError, OSError):
+            # Best-effort: some platforms / non-main threads can't set
+            # this; the default-terminate behaviour is the fallback.
+            pass
+
+    old_settings = None
+    if is_tty_in:
+        try:
+            old_settings = termios.tcgetattr(stdin_fd)
+            tty.setraw(stdin_fd)
+        except termios.error:
+            old_settings = None
+
+    stop = threading.Event()
+
+    # ---- Output uploader ---------------------------------------------------
+    # PTY bytes land in out_buf (memory). The uploader thread debounces, then
+    # appends each chunk as a plaintext entry to out_spool BEFORE encrypting
+    # and POSTing. The spool entry is the durable record: even if we SIGKILL
+    # between append and successful POST, the bytes are recoverable on the
+    # next start (provided the same sid is reused — see CRASH_RECOVERY_SECS).
+    out_buf = bytearray()
+    out_lock = threading.Lock()
+    out_event = threading.Event()
+
+    # Pending = list of {plain, end_off}: on-disk plaintext awaiting POST.
+    # Initialised from the spool (replays anything the previous run didn't
+    # confirm), then we append new entries as PTY bytes arrive.
+    pending = list(spool_pending)
+    next_seq = out_spool.next_seq()
+    if pending and pending[0]["end_off"] <= out_spool.cursor():
+        # Defensive: cursor is inside or past the first pending entry. Drop.
+        pending = [p for p in pending if p["end_off"] > out_spool.cursor()]
+
+    def output_uploader():
+        nonlocal next_seq
+        backoff = Backoff(base=0.5, cap=60.0)
+        while not stop.is_set():
+            # If pending is empty, wait for new PTY data and capture a chunk.
+            if not pending:
+                out_event.wait(timeout=0.1)
+                out_event.clear()
+                with out_lock:
+                    if not out_buf:
+                        continue
+                    chunk = bytes(out_buf)
+                    out_buf.clear()
+                end_off = out_spool.append(chunk)
+                pending.append({"plain": chunk, "end_off": end_off})
+
+            first = pending[0]
+            seq = next_seq
+            try:
+                blob_b64 = crypto_obj.encrypt_b64(
+                    first["plain"], crypto.aad_record("out", sid, seq),
+                )
+                if os.environ.get("TERMPILOT_DEBUG"):
+                    sys.stderr.write(f"[upload] seq={seq} bytes={len(first['plain'])}\n")
+                relay.request("POST", "output", body={
+                    "session_id": sid,
+                    "records": [{"seq": seq, "blob": blob_b64}],
+                }, timeout=30)
+                # Confirmed: drop from pending, advance cursor + next_seq.
+                pending.pop(0)
+                out_spool.confirm_through(first["end_off"])
+                next_seq = seq + 1
+                out_spool.write_next_seq(next_seq)
+                backoff.reset()
+            except urllib.error.HTTPError as e:
+                if e.code == 409:
+                    # Server says expected_seq is X. Drop pending entries the
+                    # server already accepted (seq < expected_seq); keep the
+                    # rest and resume at expected_seq.
+                    try:
+                        info = json.loads(e.read().decode("utf-8"))
+                        expected = int(info.get("expected_seq", seq + 1))
+                    except Exception:
+                        expected = seq + 1
+                    drop = max(0, expected - seq)
+                    for _ in range(drop):
+                        if not pending: break
+                        gone = pending.pop(0)
+                        out_spool.confirm_through(gone["end_off"])
+                    next_seq = expected
+                    out_spool.write_next_seq(next_seq)
+                    if os.environ.get("TERMPILOT_DEBUG"):
+                        sys.stderr.write(f"[upload] 409 → drop={drop} next_seq={next_seq}\n")
+                    backoff.reset()  # 409 is server-controlled progress, not failure
+                else:
+                    if os.environ.get("TERMPILOT_DEBUG"):
+                        sys.stderr.write(f"[upload] HTTP {e.code}, retrying\n")
+                    backoff.sleep()
+            except Exception as e:
+                if os.environ.get("TERMPILOT_DEBUG"):
+                    sys.stderr.write(f"[upload] {type(e).__name__}: {e}, retrying\n")
+                backoff.sleep()
+        # Final flush: pull anything still in out_buf into the spool, then
+        # try (best-effort, short timeout) to drain pending one more time.
+        with out_lock:
+            tail = bytes(out_buf); out_buf.clear()
+        if tail:
+            end_off = out_spool.append(tail)
+            pending.append({"plain": tail, "end_off": end_off})
+        for first in list(pending):
+            seq = next_seq
+            try:
+                blob_b64 = crypto_obj.encrypt_b64(
+                    first["plain"], crypto.aad_record("out", sid, seq),
+                )
+                relay.request("POST", "output", body={
+                    "session_id": sid,
+                    "records": [{"seq": seq, "blob": blob_b64}],
+                }, timeout=5)
+                pending.pop(0)
+                out_spool.confirm_through(first["end_off"])
+                next_seq = seq + 1
+                out_spool.write_next_seq(next_seq)
+            except Exception:
+                break
+
+    # ---- Input long-poller -------------------------------------------------
+    def input_poller():
+        # Cursor is advanced ONLY by successfully decrypted records. A bad
+        # record (failed AEAD) stops the loop at that seq and retries on
+        # the next poll — a hostile relay could otherwise inject a bogus
+        # record at seq=N to make the wrapper permanently skip past N,
+        # censoring whatever the browser sends. The trade-off: a single
+        # genuinely-broken record stalls input until the user reloads.
+        # The wedge is loud (stderr + events.log) so it's never silent.
+        # Same reason we ignore the relay-supplied next_seq: trusting it
+        # would let the server leap the cursor forward arbitrarily.
+        next_seq = 0
+        backoff = Backoff(base=1.0, cap=60.0)
+        wedged_seq = -1  # the seq we're currently stalled on, for log dedup
+        while not stop.is_set():
+            try:
+                j = relay.request("GET", "input", params={
+                    "session": sid, "since_seq": next_seq,
+                }, timeout=40)
+                backoff.reset()
+            except Exception:
+                if stop.is_set(): return
+                backoff.sleep()
+                continue
+            for rec in j.get("records") or []:
+                seq = int(rec.get("seq", -1))
+                blob_b64 = rec.get("blob") or ""
+                if seq < 0 or not blob_b64:
+                    continue
+                if seq != next_seq:
+                    # Out-of-order record. Ignore; the relay is the only
+                    # entity that can advance the cursor, and we trust
+                    # only AEAD-validated bytes for that.
+                    continue
+                try:
+                    plaintext = crypto_obj.decrypt_b64(
+                        blob_b64, crypto.aad_record("in", sid, seq),
+                    )
+                except Exception:
+                    # Tag mismatch / wrong key. Surface loudly and
+                    # do NOT advance the cursor — the next poll will
+                    # ask for the same seq again. A persistent bad
+                    # record stalls input here until the wrapper is
+                    # restarted; the user sees the stderr line.
+                    if seq != wedged_seq:
+                        wedged_seq = seq
+                        log_event("input_wedge", sid=sid, seq=seq)
+                        sys.stderr.write(
+                            f"termpilot: input wedged at seq={seq} "
+                            "(decrypt failed; refusing to skip — restart wrapper "
+                            "or check the browser is using the right token)\n"
+                        )
+                    break
+                wedged_seq = -1
+                try:
+                    os.write(master, plaintext)
+                except OSError:
+                    return
+                next_seq = seq + 1
+
+    # ---- Heartbeat ---------------------------------------------------------
+    def heartbeat():
+        while not stop.is_set():
+            time.sleep(15)
+            if stop.is_set(): return
+            _safely(relay.request, "POST", "heartbeat",
+                    body={"session_id": sid}, timeout=10)
+
+    threading.Thread(target=output_uploader, daemon=True).start()
+    threading.Thread(target=input_poller, daemon=True).start()
+    threading.Thread(target=heartbeat, daemon=True).start()
+
+    # ---- Main loop ---------------------------------------------------------
+    fds = [master]
+    if is_tty_in: fds.append(stdin_fd)
+    try:
+        while not shutdown_requested.is_set():
+            try:
+                r, _, _ = select.select(fds, [], [], 1.0)
+            except InterruptedError:
+                # A SIGHUP/SIGTERM lands here too; the while-check above
+                # catches it next iteration. Other signals (e.g. SIGWINCH)
+                # just resume normally.
+                continue
+            except OSError as e:
+                if e.errno == errno.EBADF: break
+                raise
+            if master in r:
+                try: data = os.read(master, 65536)
+                except OSError: data = b""
+                if not data: break
+                try: os.write(stdout_fd, data)
+                except OSError: pass
+                with out_lock: out_buf.extend(data)
+                out_event.set()
+            if is_tty_in and stdin_fd in r:
+                try: data = os.read(stdin_fd, 65536)
+                except OSError: data = b""
+                if not data:
+                    fds.remove(stdin_fd); is_tty_in = False; continue
+                try: os.write(master, data)
+                except OSError: break
+    finally:
+        stop.set(); out_event.set()
+        if old_settings is not None:
+            try: termios.tcsetattr(stdin_fd, termios.TCSADRAIN, old_settings)
+            except termios.error: pass
+        # On terminal-close the kernel already sent SIGHUP to the whole
+        # foreground process group (child included). On a bare
+        # `kill <wrapperpid>` it didn't — the PTY child is still alive
+        # and would block the waitpid below forever. Re-send SIGHUP to
+        # be sure; harmless if the child has already exited.
+        if shutdown_requested.is_set():
+            try: os.kill(pid, signal.SIGHUP)
+            except (OSError, ProcessLookupError): pass
+        _safely(relay.request, "POST", "close",
+                body={"session_id": sid,
+                      "trigger_secret_hex": trigger_secret_hex},
+                timeout=5)
+        try: os.waitpid(pid, 0)
+        except ChildProcessError: pass
+        # Inspect the spool BEFORE we touch active.json — if entries
+        # remain, we want the next termpilot in this cwd to recover
+        # them, which requires wrapper_sid + marker_b64 to stay put.
+        try:
+            leftover = out_spool.pending_chunks()
+        except Exception:
+            leftover = []
+        try: out_spool.close()
+        except Exception: pass
+
+        try:
+            cur = read_active_json(cwd)
+            if leftover:
+                # Preserve recovery state: keep wrapper_sid + marker_b64 +
+                # update ts so the next start (within CRASH_RECOVERY_SECS)
+                # reuses the sid and replays the pending chunks.
+                cur["ts"] = int(time.time())
+                cur.pop("pid", None)
+            else:
+                # Clean exit: drop wrapper_sid (and the cached marker)
+                # so the next start picks a fresh sid.
+                cur.pop("wrapper_sid", None)
+                cur.pop("marker_b64", None)
+                cur.pop("pid", None)
+                cur["ts"] = int(time.time())
+            d = cwd_cache_dir(cwd)
+            try: os.makedirs(d, mode=0o700, exist_ok=True)
+            except OSError: pass
+            try:
+                p = os.path.join(d, "active.json")
+                tmp = p + ".tmp"
+                with open(tmp, "w") as f:
+                    json.dump(cur, f); f.flush()
+                os.replace(tmp, p)
+                try: os.chmod(p, 0o600)
+                except OSError: pass
+            except OSError: pass
+        except Exception:
+            pass
+
+        if leftover:
+            log_event("preserve_spool_on_exit", sid=sid, pending=len(leftover))
+        else:
+            try: shutil.rmtree(sid_cache_dir(sid))
+            except OSError: pass
+        release_wrapper_lock(lock_fd)
+    return 0
+
+
+def _safely(fn, *args, **kwargs):
+    try: return fn(*args, **kwargs)
+    except Exception: return None
+
+
+# ============================================================================
+#  Top-level dispatch
+# ============================================================================
+
+
+def main(argv=None):
+    argv = list(argv if argv is not None else sys.argv[1:])
+
+    # First positional arg = subcommand. Long-flag aliases are accepted so
+    # the user-visible UI is `termpilot --generate-token` etc.
+    if argv and argv[0] in ("help", "--help", "-h"):
+        return cmd_help(argv[1:])
+    if argv and argv[0] in ("generate-token", "--generate-token"):
+        return cmd_generate_token(argv[1:])
+    if argv and argv[0] in ("show-token", "--show-token"):
+        return cmd_show_token(argv[1:])
+    if argv and argv[0] in ("set-relay-url", "--set-relay-url"):
+        return cmd_set_relay_url(argv[1:])
+    if argv and argv[0] in ("get-relay-url", "--get-relay-url"):
+        return cmd_get_relay_url(argv[1:])
+    if argv and argv[0] in ("set-relay-secret", "--set-relay-secret"):
+        return cmd_set_relay_secret(argv[1:])
+    if argv and argv[0] in ("clear-relay-secret", "--clear-relay-secret"):
+        return cmd_clear_relay_secret(argv[1:])
+    if argv and argv[0] == "run":
+        return cmd_run(argv[1:])
+    # No subcommand → run-mode (so `termpilot -- bash` still works).
+    return cmd_run(argv)
+
+
+if __name__ == "__main__":
+    try:
+        rc = main()
+    except KeyboardInterrupt:
+        rc = 130
+    sys.exit(rc)

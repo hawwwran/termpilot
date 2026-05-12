@@ -1,0 +1,38 @@
+Vendored third-party assets for claudemote's browser shell.
+
+Both libraries are loaded as-is and rendered same-origin so that the
+service worker can verify them against its precache, the page's CSP
+can lock script-src to 'self', and a CDN compromise does not impact
+the relay deployment.
+
+----------------------------------------------------------------------
+xterm.min.js, xterm.min.css  (xterm.js 5.3.0)
+
+  Upstream: https://github.com/xtermjs/xterm.js
+  License:  MIT
+  Source:   https://cdn.jsdelivr.net/npm/xterm@5.3.0/
+
+  MIT License — Copyright (c) 2017-2023 The xterm.js authors
+  See https://github.com/xtermjs/xterm.js/blob/5.3.0/LICENSE
+
+  Bundled checksums (sha256 of the bytes in this directory):
+    xterm.min.css  64ee6c4db69b4224d3362aced0fd4cdd620e0e60b3d01566450ae2d4b9e81849
+    xterm.min.js   fc1dd31b221e3e5f929486e07a80b477a8aaf9dce2b4f9c3ffe7dd25f370655d
+
+----------------------------------------------------------------------
+jsQR.js  (jsQR 1.4.0)
+
+  Upstream: https://github.com/cozmo/jsQR
+  License:  Apache-2.0
+  Source:   https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js
+
+  Apache License 2.0 — Copyright 2017 Cosmo Wolfe
+  See https://github.com/cozmo/jsQR/blob/v1.4.0/LICENSE
+
+  Bundled checksum (sha256 of the bytes in this directory):
+    jsQR.js        bc40c8a15196236b2314db0856f72ca0b49980cd5413b8c852a7349f5fee0859
+
+----------------------------------------------------------------------
+To refresh these files, run tools/vendor-fetch.sh from a clean tree
+and verify the new checksums match the upstream package distribution
+before committing.

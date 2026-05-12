@@ -1,0 +1,126 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>crypto.js cross-language test</title>
+<style>
+body { font-family: monospace; background:#111; color:#ddd; padding:16px; }
+.ok { color:#5b8; }
+.fail { color:#f55; font-weight:bold; }
+pre { white-space: pre-wrap; }
+</style>
+</head><body>
+<h2>crypto.js × Python vector test</h2>
+<pre id="out">running…</pre>
+<script src="../php/lib/crypto.js"></script>
+<script>
+async function run() {
+  const log = [];
+  let pass = 0, fail = 0;
+  function ok(msg)   { log.push('<span class="ok">PASS</span>  ' + msg); pass++; }
+  function bad(msg)  { log.push('<span class="fail">FAIL</span>  ' + msg); fail++; }
+
+  function eq(a, b) {
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+    return true;
+  }
+
+  try {
+    // Load vectors written by Python.
+    const vectors = await fetch('crypto_vectors.json').then(r => r.json());
+
+    // 1. KDF round-trip
+    const tokenFromPwd = await TP.deriveToken(vectors.kdf.password);
+    const tokenFromHex = TP.hexToBytes(vectors.kdf.token_hex);
+    if (eq(tokenFromPwd, tokenFromHex)) ok('KDF (password → token) matches Python output');
+    else bad('KDF mismatch — expected ' + vectors.kdf.token_hex
+              + ', got ' + TP.bytesToHex(tokenFromPwd));
+
+    // 2. Hex round-trip
+    const reHex = TP.bytesToHex(tokenFromHex);
+    if (reHex.toLowerCase() === vectors.kdf.token_hex.toLowerCase())
+      ok('hex round-trip stable');
+    else bad('hex round-trip differs');
+
+    // 3. Decrypt each Python-encrypted case.
+    const key = await TP.importAesKey(tokenFromHex);
+    for (const c of vectors.cases) {
+      const expected = TP.b64ToBytes(c.plaintext_b64);
+      try {
+        const got = await TP.decryptB64(key, c.ciphertext_b64, c.aad_str);
+        if (eq(got, expected)) ok('decrypt ' + c.name);
+        else bad('decrypt ' + c.name + ' — plaintext mismatch');
+      } catch (e) {
+        bad('decrypt ' + c.name + ' — threw: ' + e.message);
+      }
+    }
+
+    // 4. Wrong AAD must reject.
+    try {
+      await TP.decryptB64(key, vectors.cases[0].ciphertext_b64, 'bogus:aad');
+      bad('wrong AAD should have rejected');
+    } catch (e) {
+      ok('wrong AAD rejected (' + e.name + ')');
+    }
+
+    // 5. Wrong key must reject.
+    const otherKey = await TP.importAesKey(await TP.deriveToken('different'));
+    try {
+      await TP.decryptB64(otherKey, vectors.cases[0].ciphertext_b64, vectors.cases[0].aad_str);
+      bad('wrong key should have rejected');
+    } catch (e) {
+      ok('wrong key rejected (' + e.name + ')');
+    }
+
+    // 6. Tamper one byte must reject.
+    const blob = TP.b64ToBytes(vectors.cases[0].ciphertext_b64);
+    blob[blob.length - 1] ^= 0x01;
+    try {
+      await TP.decrypt(key, blob, vectors.cases[0].aad_str);
+      bad('tampered tag should have rejected');
+    } catch (e) {
+      ok('tampered ciphertext rejected (' + e.name + ')');
+    }
+
+    // 7. JS→JS round trip.
+    const pt = new TextEncoder().encode('hello from js');
+    const aad = 'meta:v1:js-test';
+    const ctB64 = await TP.encryptB64(key, pt, aad);
+    const back = await TP.decryptB64(key, ctB64, aad);
+    if (eq(back, pt)) ok('JS round-trip self-consistent');
+    else bad('JS round-trip mismatch');
+
+    // 8. Nonces unique on consecutive encrypts.
+    const a = TP.b64ToBytes(await TP.encryptB64(key, new Uint8Array([1]), 'a'));
+    const b = TP.b64ToBytes(await TP.encryptB64(key, new Uint8Array([1]), 'a'));
+    if (!eq(a.subarray(0, 12), b.subarray(0, 12))) ok('nonces unique across calls');
+    else bad('nonces collided!');
+
+    // 9. Trigger secret/id matches Python.
+    if (vectors.trigger) {
+      const sec = await TP.deriveTriggerSecret(tokenFromHex);
+      const tid = await TP.triggerIdFor(tokenFromHex);
+      if (TP.bytesToHex(sec) === vectors.trigger.secret_hex)
+        ok('trigger_secret matches Python');
+      else bad('trigger_secret mismatch — expected ' + vectors.trigger.secret_hex
+                + ', got ' + TP.bytesToHex(sec));
+      if (TP.bytesToHex(tid) === vectors.trigger.id_hex)
+        ok('trigger_id matches Python');
+      else bad('trigger_id mismatch — expected ' + vectors.trigger.id_hex
+                + ', got ' + TP.bytesToHex(tid));
+    } else {
+      bad('vectors file missing trigger section — re-run gen-vectors');
+    }
+
+  } catch (e) {
+    bad('test runner threw: ' + e.message);
+    console.error(e);
+  }
+
+  log.unshift('---- ' + pass + ' passed, ' + fail + ' failed ----\n');
+  document.getElementById('out').innerHTML = log.join('\n');
+  document.title = (fail === 0 ? 'OK ' : 'FAIL ') + pass + '/' + (pass + fail);
+  // Expose for headless test runners.
+  window._results = { pass, fail };
+}
+run();
+</script>
+</body></html>

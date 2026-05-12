@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>TermPilot — terminal</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content" />
+<meta name="theme-color" content="#0d0f12" />
+<meta name="application-name" content="TermPilot" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="TermPilot" />
+<link rel="manifest" href="./manifest.webmanifest" />
+<link rel="icon" href="./icon-192.png" sizes="192x192" type="image/png" />
+<link rel="icon" href="./icon-512.png" sizes="512x512" type="image/png" />
+<link rel="apple-touch-icon" href="./icon-192.png" />
+<link rel="stylesheet" href="./lib/index.css" />
+</head>
+<body>
+<div class="termpilot-update-banner" id="termpilot-update-banner" hidden role="status" aria-live="polite">
+  <span>A new version is available.</span>
+  <button type="button" id="termpilot-update-btn">UPDATE</button>
+</div>
+<header>
+  <button class="icon desktop-only" id="toggle-aside" title="Toggle sessions panel" aria-label="Toggle sessions panel">☰</button>
+  <h1>TermPilot</h1>
+  <span class="connbadge" id="connbadge" title="connecting"></span>
+  <span class="meta" id="connstatus">—</span>
+  <span class="grow"></span>
+</header>
+<main class="collapsed">
+  <aside>
+    <div class="sidebar-head">
+      <span class="sidebar-title">Sessions</span>
+      <button class="ghost" data-action="settings">settings</button>
+    </div>
+    <div id="sessions-host">
+      <div class="empty">No sessions yet.</div>
+    </div>
+  </aside>
+  <section>
+    <div class="session-bar empty-state" id="session-bar">
+      <button class="icon mobile-only" id="back-to-list" title="Back to sessions">‹</button>
+      <div class="sb-flow">
+        <div class="sb-main">
+          <span class="sb-title" id="sb-title">No session selected</span>
+          <span class="sb-id" id="sb-id"></span>
+        </div>
+        <div class="sb-meta">
+          <span class="sb-cwd" id="sb-cwd"></span>
+          <span class="sb-started" id="sb-started"></span>
+        </div>
+      </div>
+    </div>
+    <div id="empty-hero" class="empty-hero" hidden>
+      <div class="hero-card">
+        <img src="./icon-512.png" alt="" class="hero-icon" />
+        <h2>No active sessions</h2>
+        <p>Run <code>termpilot</code> on a PC to start one. Sessions are end-to-end encrypted &mdash; only the device tokens you have here can see them.</p>
+        <button type="button" class="hero-reload" id="empty-reload">
+          <span class="spin">↻</span><span class="reload-label">Reload</span>
+        </button>
+        <p class="hero-hint" id="empty-hint">&nbsp;</p>
+        <button type="button" class="hero-secondary" data-action="settings">settings</button>
+      </div>
+    </div>
+    <div class="log-area">
+      <pre id="log"></pre>
+      <div id="log-loading" hidden>
+        <div class="loader-spinner" aria-hidden="true"></div>
+        <div class="loader-label">Loading session…</div>
+      </div>
+    </div>
+    <div id="term-host"></div>
+    <div class="ctrl">
+      <button data-keys="\x1b">Esc</button>
+      <button data-keys="\x03">Ctrl-C</button>
+      <button data-keys="\r">Enter</button>
+      <button data-keys="\x1b[A">↑</button>
+      <button data-keys="\x1b[B">↓</button>
+      <button data-keys="\x1b[D">←</button>
+      <button data-keys="\x1b[C">→</button>
+      <button data-keys="\x09">Tab</button>
+      <button data-keys="\x1b[Z">Sh-Tab</button>
+    </div>
+    <form id="inputform">
+      <button type="button" class="icon mobile-only" id="toggle-ctrl" title="Toggle keyboard shortcuts">⌨</button>
+      <input type="text" id="msg" placeholder="Type a message and press Enter — sent to the selected session" autocomplete="off" />
+      <button type="submit">Send</button>
+    </form>
+  </section>
+</main>
+
+<!-- xterm headless parser, vendored locally (see php/lib/vendor/NOTICE) -->
+<link rel="stylesheet" href="./lib/vendor/xterm.min.css" />
+<script src="./lib/vendor/xterm.min.js"></script>
+<script src="./lib/crypto.js"></script>
+<script src="./lib/session.js"></script>
+<script src="./lib/index.js" defer></script>
+</body>
+</html>

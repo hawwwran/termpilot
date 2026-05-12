@@ -1,0 +1,75 @@
+# Apache: prevent direct HTTP access to sensitive files and editor
+# backups. (PHP can still read them — this only stops HTTP requests.)
+
+# config.php itself + every backup/swap variant editors leave behind
+# (config.php~, config.php.bak, .config.php.swp, ...).
+<FilesMatch "(^|/)config\.php(\..*|~)?$">
+    Require all denied
+</FilesMatch>
+
+# Backups of relay.php ONLY (relay.php~, relay.php.bak, ...) — must
+# require a non-empty suffix so the live relay.php itself stays
+# reachable. The bug it replaces: a previous version of this regex
+# had `(\..*|~)?$` (suffix optional), which silently 404'd relay.php
+# and broke the entire deployment.
+<FilesMatch "(^|/)relay\.php(\..+|~)$">
+    Require all denied
+</FilesMatch>
+
+# Anything ending in a common backup/scratch extension, regardless of
+# the base name (catches relay.php.dist, foo.inc.bak, deploy.sh.orig, ...).
+<FilesMatch "\.(bak|old|swp|save|orig|dist|inc|sample|example|tmp)$">
+    Require all denied
+</FilesMatch>
+
+# Hidden dotfiles (.env, .git*, .htpasswd, .DS_Store, ...).
+<FilesMatch "^\.">
+    Require all denied
+</FilesMatch>
+
+# Block any URL that targets the data/ or logs/ directories.
+RewriteEngine On
+RewriteRule ^data(/.*)?$ - [F,L]
+RewriteRule ^logs(/.*)?$ - [F,L]
+
+# Make long-polling actually long: ensure no buffering on the PHP responses.
+# (Most shared hosts ignore these from .htaccess, but they don't hurt.)
+<IfModule mod_headers.c>
+    Header set X-Accel-Buffering "no"
+</IfModule>
+
+# Security headers. The page holds device tokens in localStorage so any
+# XSS sink is an immediate token-exfiltration vector — a strict CSP is
+# the cheapest defense.
+#
+# - default-src 'self': everything must come from this origin.
+# - script-src 'self': no inline <script>, no eval. All page logic now
+#   lives in lib/index.js (commit 8 moved it out of index.html).
+# - style-src 'self' 'unsafe-inline': inline style attributes are still
+#   used by xterm.js for cell rendering; lock the externals to same-origin.
+# - img-src 'self' data:: data: URLs used by inline SVG icons.
+# - connect-src 'self': fetch() limited to the relay's own origin.
+# - object-src 'none': no <object>/<embed>.
+# - base-uri 'self': prevents injection of a <base> that retargets relative URLs.
+# - frame-ancestors 'none': page can't be iframed by a third party.
+<IfModule mod_headers.c>
+    Header set Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none';"
+    Header set X-Content-Type-Options "nosniff"
+    Header set Referrer-Policy "same-origin"
+    Header set X-Frame-Options "DENY"
+</IfModule>
+
+# PWA assets need correct MIME types to install. Most shared hosts ship a
+# sane mime.types but webmanifest is sometimes missing.
+<IfModule mod_mime.c>
+    AddType application/manifest+json .webmanifest
+    AddType image/svg+xml .svg
+</IfModule>
+
+# Service worker must be served with a tight (or absent) cache so updates
+# propagate. Worker URL: /sw.js (browsers re-check it on every page load).
+<IfModule mod_headers.c>
+    <FilesMatch "^sw\.js$">
+        Header set Cache-Control "no-cache, max-age=0, must-revalidate"
+    </FilesMatch>
+</IfModule>
