@@ -254,13 +254,10 @@ def handle_pending_update_notice(script_dir: str) -> None:
         v, _ = _read_local_version(script_dir)
         latest = _fetch_latest_tag(timeout=ON_START_TIMEOUT_S)
         if latest is None:
-            # GitHub unreachable; trust the parked tag as a still-valid
-            # notice. Don't touch the file — next time we'll re-check.
-            pending = _read_pending_tag()
-            if pending:
-                _show_update_notice(pending, v)
-            else:
-                _clear_pending()
+            # GitHub unreachable: don't show the parked notice (it may
+            # already be stale) and don't clear the file (we have no
+            # evidence it's invalid). Leave the parked tag alone — the
+            # next start will re-check.
             return
         if v and _semver_tuple(latest) <= _semver_tuple(v):
             _clear_pending()
