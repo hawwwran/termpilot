@@ -84,6 +84,14 @@ def _confirm(prompt: str) -> bool:
     return reply in ("", "y", "yes")
 
 
+def _is_dev_tree(script_dir: str) -> bool:
+    """A `.git` directory next to the wrapper marks a dev checkout.
+    `--version` / `--update` still report newer releases there, but
+    skip the "install now?" prompt — the user is editing the code,
+    not running it as a production install."""
+    return os.path.isdir(os.path.join(script_dir, ".git"))
+
+
 def _run_installer(script_dir: str) -> int:
     """Invoke install-latest-version.sh. Prefer the local copy next to
     the wrapper (it's part of the same release zip); fall back to
@@ -118,6 +126,9 @@ def cmd_version(args, script_dir: str) -> int:
         sys.stdout.write(f"  You're on the latest version (remote: {latest}).\n")
         return 0
     sys.stdout.write(f"  Newer version available: {latest}\n")
+    if _is_dev_tree(script_dir):
+        sys.stdout.write("  DEV environment detected. Skipping install prompt.\n")
+        return 0
     if _confirm("Install it now?"):
         return _run_installer(script_dir)
     return 0
@@ -135,6 +146,9 @@ def cmd_update(args, script_dir: str) -> int:
         return 0
     sys.stdout.write(f"Newer version available: {latest} "
                      + (f"(installed: {v})\n" if v else "(installed: unknown)\n"))
+    if _is_dev_tree(script_dir):
+        sys.stdout.write("DEV environment detected. Skipping install prompt.\n")
+        return 0
     if _confirm("Install it now?"):
         return _run_installer(script_dir)
     return 0
