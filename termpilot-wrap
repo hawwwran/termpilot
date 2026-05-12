@@ -1255,13 +1255,6 @@ def cmd_run(argv):
     title = args.title or (cmd[0] if cmd else "session")
     relay = Relay(relay_url, auth_secret, insecure=args.insecure)
 
-    # Early stderr line so a slow register (e.g. a relay that takes a
-    # few seconds to respond, or a network where one IP family is
-    # broken even with happy-eyeballs in place) doesn't look like a
-    # silent hang. Replaced by the proper banner once register returns.
-    sys.stderr.write(f"\033[2mtermpilot: connecting to {relay_url}…\033[0m\n")
-    sys.stderr.flush()
-
     # ---- Register: encrypt meta + marker, ship public_meta as plaintext.
     cmd_str = shlex.join(cmd)
     init_cols, init_rows = cols_rows_of(sys.stdout.fileno()) if os.isatty(sys.stdout.fileno()) else (100, 30)
