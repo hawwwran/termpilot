@@ -1,0 +1,89 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify tag points at main
+        # Safety check copied from hwntools: refuse to release a tag
+        # that isn't on the main branch's tip.
+        run: |
+          TAG_COMMIT=$(git rev-parse HEAD)
+          MAIN_COMMIT=$(git ls-remote origin refs/heads/main | cut -f1)
+          if [ "$TAG_COMMIT" != "$MAIN_COMMIT" ]; then
+            echo "Tag points to $TAG_COMMIT but main is at $MAIN_COMMIT — refusing."
+            exit 1
+          fi
+
+      - name: Stamp VERSION.json
+        run: |
+          TAG="${{ github.ref_name }}"
+          VER="${TAG#v}"
+          DATE="$(date -u +%Y-%m-%d)"
+          cat > VERSION.json <<EOF
+          {
+            "version": "${VER}",
+            "released": "${DATE}",
+            "tag": "${TAG}"
+          }
+          EOF
+          cat VERSION.json
+
+      - name: Generate VERSION.md changelog
+        run: |
+          TAG="${{ github.ref_name }}"
+          PREV_TAG=$(git tag --sort=-v:refname | grep -v "^${TAG}$" | head -1)
+          {
+            echo "# TermPilot ${TAG}"
+            echo ""
+            echo "Released: $(date -u +%Y-%m-%d)"
+            echo ""
+            echo "## Changes"
+            echo ""
+            if [ -n "$PREV_TAG" ]; then
+              git log "${PREV_TAG}..${TAG}" --pretty=format:"- %s" --no-merges
+            else
+              git log --pretty=format:"- %s" --no-merges
+            fi
+            echo ""
+          } > VERSION.md
+          cat VERSION.md
+
+      - name: Pack termpilot.zip
+        run: |
+          # Exclude internal dev artefacts and per-host runtime state.
+          # config.php / data / logs are user-specific runtime state and
+          # must never ship. server-logs holds deploy backups and is
+          # huge. The .github tree itself isn't useful to end users.
+          zip -r termpilot.zip . \
+            -x '.git/*' \
+            -x '.github/*' \
+            -x 'server-logs/*' \
+            -x '__pycache__/*' \
+            -x '*/__pycache__/*' \
+            -x '*.pyc' \
+            -x 'php/config.php' \
+            -x 'php/data/*' \
+            -x 'php/logs/*' \
+            -x '.claude/*' \
+            -x '.playwright-mcp/*'
+          ls -l termpilot.zip
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: termpilot.zip
+          generate_release_notes: true
+          body_path: VERSION.md

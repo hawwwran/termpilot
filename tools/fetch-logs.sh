@@ -13,6 +13,7 @@ set -euo pipefail
 # shellcheck source=lib-ftp-host.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib-ftp-host.sh"
 resolve_ftp_host
+resolve_ftp_credentials
 REMOTE_DIR="${TERMPILOT_FTP_LOG_DIR:-/logs}"
 LOCAL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")"/.. && pwd)/server-logs"
 

@@ -13,6 +13,7 @@ set -euo pipefail
 # shellcheck source=lib-ftp-host.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib-ftp-host.sh"
 resolve_ftp_host
+resolve_ftp_credentials
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")"/.. && pwd)/php"
 BACKUP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")"/.. && pwd)/server-logs/backup-$(date +%Y%m%dT%H%M%S)"
 

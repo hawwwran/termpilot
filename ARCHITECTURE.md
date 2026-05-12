@@ -442,16 +442,52 @@ plus POSIX PTY/termios calls; everything else (paths, keyring backend,
 shell rc detection) branches at runtime, so the same checkout runs on
 both.
 
-1. `cd ~/git/termpilot && ./install.sh`
-   On Linux this patches `~/.bashrc`; on macOS it patches `~/.zshrc`
-   (and `~/.bash_profile` if you also use bash). It also defines a
-   short `tp` alias for `termpilot` when no other `tp` command exists.
+### End-user install via the bootstrap
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/hawwwran/termpilot/main/install-latest-version.sh | bash
+```
+
+`install-latest-version.sh` resolves the latest GitHub release tag,
+downloads `termpilot.zip`, extracts to `~/.local/share/termpilot/`,
+runs the bundled `install.sh`, then asks whether to mint a device
+token and whether to deploy the relay. Subsequent updates via
+`termpilot --update` re-extract over the same path and re-run
+`install.sh` so the shell function repoints cleanly.
+
+### Develop / contribute
+
+1. `cd ~/git/termpilot && ./install.sh` — repoints the shell function
+   at the dev checkout. On Linux this patches `~/.bashrc`; on macOS
+   `~/.zshrc` (and `~/.bash_profile` if you also use bash). It also
+   defines a short `tp` alias when no other `tp` command exists.
 2. `termpilot --set-relay-url https://your.host/path`
-3. `termpilot --generate-token` — sudo prompts (Touch ID on Mac if
-   enrolled), generates random token, saves it, shows hex.
+3. `termpilot --generate-token` — sudo-gated; mints a random 32-byte
+   token, saves it (keyring/file), prints hex.
 4. (Only if your relay sets `RELAY_SECRET` in `config.php`)
    `termpilot --set-relay-secret 'YOUR_RELAY_SECRET'`
 5. `termpilot` — start a session.
+
+To switch back to the installed prod copy after dev work:
+`~/.local/share/termpilot/install.sh`.
+
+### Release flow
+
+- `VERSION.json` in repo root holds the version metadata (read by
+  `termpilot --version` and `--update`). The committed value reflects
+  the in-development version; CI rewrites it at release time so each
+  shipped zip carries its own.
+- `.github/workflows/release.yml` triggers on `v*` tags. It verifies
+  the tag is on `main`, stamps `VERSION.json`, generates a
+  `VERSION.md` changelog from `git log <prev>..<this>`, zips the tree
+  (excluding `.git`, `.github`, `server-logs`, caches, runtime
+  config/data), and attaches `termpilot.zip` to the GitHub Release.
+- The local launcher
+  `~/SynologyDrive/Development/linux/hwntools-custom-packages/releases/release-termpilot.sh`
+  is the convenience wrapper that picks the next version (patch bump
+  by default), pushes the tag, and polls until the release asset is
+  attached. It's sudo-gated (anti-shoulder-surf) and uses `gh` for
+  the release API checks.
 
 ## Setup (browser side)
 

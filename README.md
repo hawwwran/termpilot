@@ -81,24 +81,58 @@ latest 5; older backups are trimmed automatically). It also stamps a
 UTC build timestamp into `sw.js` so every deploy bumps the PWA cache
 version and triggers the in-app update banner.
 
-## PC-side install
+## PC-side install (end users)
 
 Supported on **Linux** and **macOS**. Requirements:
 
 - Python 3.9+ (stdlib only — no pip dependencies for the wrapper itself).
 - A POSIX shell (`bash` or `zsh`).
+- `curl` and `unzip` (almost certainly already present).
 - *(optional, recommended)* the `keyring` Python package, so the token
   goes into GNOME Keyring (Linux) or macOS Keychain instead of a chmod-600
   file: `pipx install keyring` or `pip install --user keyring`.
 
+One-liner: download the latest release zip, extract to
+`~/.local/share/termpilot/`, run the bundled `install.sh`, and offer
+to mint a device token + deploy the relay:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/hawwwran/termpilot/main/install-latest-version.sh | bash
+```
+
+Or, if you've already downloaded `termpilot.zip` from a GitHub release
+and extracted it somewhere, just run the bundled installer:
+
+```sh
+./install-latest-version.sh
+```
+
+Then keep up with new releases:
+
+```sh
+termpilot --version    # prints installed version + checks GitHub for newer
+termpilot --update     # if a newer release exists, prompts to install it
+```
+
+## PC-side install (develop / contribute)
+
+If you cloned the repo and want to point `termpilot` at the dev tree
+instead of the installed copy:
+
 ```sh
 cd ~/git/termpilot
-./install.sh                              # creates `termpilot` shell function
+./install.sh                              # repoints `termpilot` at this checkout
 termpilot --set-relay-url https://your.host/term
 termpilot --set-relay-secret 'XXXX'       # only if you set RELAY_SECRET in config.php
 termpilot --generate-token                # sudo-gated; mints a random 32-byte token
                                           # and shows the hex (paste into the browser)
 ```
+
+Run the dev-tree `install.sh` to switch to the dev checkout; run the
+installed-copy `~/.local/share/termpilot/install.sh` to switch back.
+Updates triggered while pointed at a dev checkout (`termpilot --update`)
+re-extract to `~/.local/share/termpilot/` and repoint the shell function
+there — your dev tree's files are never touched.
 
 `install.sh` writes a fenced source-line block into whichever rc file
 matches your shell — `~/.bashrc` on Linux, `~/.zshrc` on macOS — plus
@@ -183,23 +217,26 @@ Run the Python test suite (`tests/run-all.sh`) before deploying.
 ```
 termpilot/
 ├── termpilot-wrap               main wrapper binary (multi-subcommand)
-├── install.sh                 installs the `termpilot` shell function
-├── lib/                       Python crypto + token modules
-├── php/                       what gets uploaded to the host
-│   ├── relay.php              encrypted byte/input/push API
-│   ├── index.html             terminal view (the only view)
-│   ├── manifest.webmanifest   PWA manifest
-│   ├── sw.js                  service worker (cache + push + bg-sync)
-│   ├── icon-*.png             app icons (192/512, regular + maskable)
-│   ├── lib/                   browser JS (crypto.js, session.js)
-│   ├── config.example.php     copy → config.php
-│   └── .htaccess              denies data/, logs/, config.php; PWA MIMEs
-├── tests/                     run with tests/run-all.sh
+├── install.sh                   installs the `termpilot` shell function
+├── install-latest-version.sh    end-user bootstrap (downloads latest release zip)
+├── VERSION.json                 release metadata, read by --version / --update
+├── lib/                         Python crypto + keystore modules
+├── php/                         what gets uploaded to the host
+│   ├── relay.php                encrypted byte/input/push API
+│   ├── index.html               terminal view (the only view)
+│   ├── manifest.webmanifest     PWA manifest
+│   ├── sw.js                    service worker (cache + push + bg-sync)
+│   ├── icon-*.png               app icons (192/512, regular + maskable)
+│   ├── lib/                     browser JS (crypto.js, session.js, keyboard.js)
+│   ├── config.example.php       copy → config.php
+│   └── .htaccess                denies data/, logs/, config.php; PWA MIMEs
+├── tests/                       run with tests/run-all.sh
 ├── tools/
-│   ├── lib-ftp-host.sh        shared FTP-host resolver (env / file / prompt)
-│   ├── deploy.sh              upload php/ over FTPS (~/.netrc)
-│   └── fetch-logs.sh          pull relay.log via FTP
-└── ARCHITECTURE.md            architecture, threat model, ops notes
+│   ├── lib-ftp-host.sh          shared FTP-host + credentials resolver
+│   ├── deploy.sh                upload php/ over FTPS (~/.netrc)
+│   └── fetch-logs.sh            pull relay.log via FTP
+├── .github/workflows/release.yml CI: on v* tag, build and attach termpilot.zip
+└── ARCHITECTURE.md              architecture, threat model, ops notes
 ```
 
 ## Wrapper-side cache + diagnostics

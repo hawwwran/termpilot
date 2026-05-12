@@ -450,6 +450,8 @@ Setup (run once)
   termpilot --clear-relay-secret         forget the relay's Bearer token
   termpilot --generate-token             create / replace your encryption token
   termpilot --show-token                 reveal the stored token (gated by sudo)
+  termpilot --version                    print installed version + check for newer
+  termpilot --update                     check for newer release and install if any
   termpilot --help                       this message
 
 Run
@@ -1661,6 +1663,12 @@ def main(argv=None):
         return cmd_set_relay_secret(argv[1:])
     if argv and argv[0] in ("clear-relay-secret", "--clear-relay-secret"):
         return cmd_clear_relay_secret(argv[1:])
+    if argv and argv[0] in ("version", "--version", "-V"):
+        from lib import release_channel
+        return release_channel.cmd_version(argv[1:], SCRIPT_DIR)
+    if argv and argv[0] in ("update", "--update"):
+        from lib import release_channel
+        return release_channel.cmd_update(argv[1:], SCRIPT_DIR)
     if argv and argv[0] == "run":
         return cmd_run(argv[1:])
     # No subcommand → run-mode (so `termpilot -- bash` still works).
