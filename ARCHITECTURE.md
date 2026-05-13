@@ -468,8 +468,7 @@ termpilot/
 │   ├── deploy.sh              upload relay/ over FTPS
 │   ├── fetch-logs.sh          pull relay logs via FTP
 │   ├── vendor-fetch.sh        refresh pinned browser deps under relay/lib/vendor/
-│   ├── build-release.sh       build per-platform release zips locally
-│   └── sync-win-to-share.sh   mirror windows/ to a network share for testing
+│   └── build-release.sh       build per-platform release zips locally
 │
 └── .github/workflows/release.yml CI: on v* tag, build + attach both zips
 ```

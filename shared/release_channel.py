@@ -23,9 +23,11 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import ssl
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -139,11 +141,28 @@ def _is_dev_tree(script_dir: str) -> bool:
 def _run_installer(script_dir: str) -> int:
     """Find install-latest-version.{sh,bat} next to the wrapper and
     invoke it via the matching shell. The release zip ships exactly one
-    of the two; both can coexist in the dev tree."""
+    of the two; both can coexist in the dev tree.
+
+    On Windows we stage the .bat + .ps1 to TEMP before invoking. The
+    installer wipes %LOCALAPPDATA%\\Programs\\termpilot mid-run, and on
+    `--update` the wrapper lives there, so the .bat would be deleted
+    while cmd.exe is line-by-line reading it. Symptom: "The batch file
+    cannot be found." after the .ps1 returns, and Expand-Archive itself
+    misbehaving with a "LiteralPath null" parameter-validation error.
+    """
     sh = os.path.join(script_dir, "install-latest-version.sh")
     bat = os.path.join(script_dir, "install-latest-version.bat")
+    ps1 = os.path.join(script_dir, "install-latest-version.ps1")
     if sys.platform == "win32" and os.path.isfile(bat):
-        return subprocess.call(["cmd.exe", "/c", bat])
+        stage = tempfile.mkdtemp(prefix="termpilot-installer-")
+        try:
+            staged_bat = os.path.join(stage, "install-latest-version.bat")
+            shutil.copy2(bat, staged_bat)
+            if os.path.isfile(ps1):
+                shutil.copy2(ps1, os.path.join(stage, "install-latest-version.ps1"))
+            return subprocess.call(["cmd.exe", "/c", staged_bat])
+        finally:
+            shutil.rmtree(stage, ignore_errors=True)
     if os.path.isfile(sh):
         return subprocess.call(["bash", sh])
     if os.path.isfile(bat):

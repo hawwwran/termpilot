@@ -282,8 +282,7 @@ termpilot/
 │   ├── deploy.sh                upload relay/ over FTPS (~/.netrc)
 │   ├── fetch-logs.sh            pull relay.log via FTP
 │   ├── vendor-fetch.sh          re-fetch pinned browser deps under relay/lib/vendor/
-│   ├── build-release.sh         stages dist/termpilot-{linux-macos,windows}.zip
-│   └── sync-win-to-share.sh     mirror windows/ to a test share
+│   └── build-release.sh         stages dist/termpilot-{linux-macos,windows}.zip
 ├── VERSION.json                 dev value (CI rewrites per release)
 ├── .github/workflows/release.yml CI: on v* tag, build and attach both zips
 └── ARCHITECTURE.md              architecture, threat model, ops notes

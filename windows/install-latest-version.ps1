@@ -79,11 +79,50 @@ Write-Step "Extracting to $InstallRoot ..."
 if (-not (Test-Path -LiteralPath $InstallRoot)) {
     New-Item -ItemType Directory -Path $InstallRoot -Force | Out-Null
 }
+# Best-effort wipe. SilentlyContinue tolerates locked files (rare —
+# typically only when something is still mid-tear-down); the per-entry
+# extract below overwrites whatever survives.
 Get-ChildItem -LiteralPath $InstallRoot -Force | ForEach-Object {
-    Remove-Item -LiteralPath $_.FullName -Recurse -Force
+    Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
 }
+
+# Defensive: spell out the failure mode if $zipPath somehow got cleared
+# or the file disappeared (AV quarantine) — otherwise the .NET / cmdlet
+# error would be cryptic.
+if ([string]::IsNullOrEmpty($zipPath) -or -not (Test-Path -LiteralPath $zipPath)) {
+    throw "Downloaded zip missing at '$zipPath' before extraction. Antivirus interference?"
+}
+
+# Use the .NET ZipFile API directly. PS 5.1's Expand-Archive has been
+# observed to surface "Cannot validate argument on parameter
+# 'LiteralPath'. The argument is null or empty." when the destination
+# was just wiped — a misleading wrapper-level error that hides the real
+# state. Per-entry ExtractToFile($entry, $path, $overwrite=$true) gives
+# us predictable overwrite semantics on .NET Framework 4.5+ (the 3-arg
+# ExtractToDirectory overload is .NET Core only).
 try {
-    Expand-Archive -LiteralPath $zipPath -DestinationPath $InstallRoot -Force
+    Add-Type -AssemblyName System.IO.Compression
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $archive = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
+    try {
+        foreach ($entry in $archive.Entries) {
+            $destPath = [System.IO.Path]::Combine($InstallRoot, $entry.FullName.Replace('/', [System.IO.Path]::DirectorySeparatorChar))
+            if ([string]::IsNullOrEmpty($entry.Name)) {
+                # Directory entry (zip convention: trailing slash).
+                if (-not (Test-Path -LiteralPath $destPath)) {
+                    New-Item -ItemType Directory -Path $destPath -Force | Out-Null
+                }
+            } else {
+                $destDir = [System.IO.Path]::GetDirectoryName($destPath)
+                if ($destDir -and -not (Test-Path -LiteralPath $destDir)) {
+                    New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+                }
+                [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $destPath, $true)
+            }
+        }
+    } finally {
+        $archive.Dispose()
+    }
 } catch {
     throw "Extraction failed: $($_.Exception.Message)"
 }

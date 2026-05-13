@@ -72,8 +72,7 @@ termpilot/
 │   ├── deploy.sh                upload relay/ over FTPS
 │   ├── fetch-logs.sh            pull relay.log over FTP
 │   ├── vendor-fetch.sh          refresh pinned browser deps under relay/lib/vendor/
-│   ├── build-release.sh         build per-platform release zips locally
-│   └── sync-win-to-share.sh     mirror windows/ to a network share for testing
+│   └── build-release.sh         build per-platform release zips locally
 ├── .github/workflows/release.yml CI: on v* tag, build + attach both zips
 ├── VERSION.json                 dev value; CI rewrites per release
 ├── ARCHITECTURE.md              architecture, threat model, ops notes
@@ -100,4 +99,4 @@ linux/tests/run-all.sh
 ```
 
 There is no automated Windows test suite yet; the wrapper is exercised
-by hand using the share-mirror setup (see `tools/sync-win-to-share.sh`).
+by hand on a Windows box.

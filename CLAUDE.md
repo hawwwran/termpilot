@@ -30,7 +30,6 @@ tools/fetch-logs.sh                         # pull relay.log via FTP
 tools/vendor-fetch.sh                       # re-download pinned xterm.js + jsQR; checksums verified
 tools/build-release.sh linux                # → dist/termpilot-linux-macos.zip (flat)
 tools/build-release.sh windows              # → dist/termpilot-windows.zip (flat)
-tools/sync-win-to-share.sh                  # mirror windows/ to a network share for end-to-end testing on a Windows box
 ```
 
 Browser-side cross-language vectors are run manually — `linux/tests/test_crypto.html` over a local `python3 -m http.server`; `run-all.sh` does NOT cover this path.
