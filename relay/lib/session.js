@@ -584,14 +584,25 @@
     _savePush({ enabled: true, registered: out, ts: Date.now() });
   }
   /** Turn push off: unregister from the relay for every token, then drop
-   *  the local subscription so the browser stops receiving pushes. */
+   *  the local subscription so the browser stops receiving pushes.
+   *  trigger_secret_hex (HMAC of the device token) proves token possession
+   *  — without it the relay refuses since op_push_unsubscribe is gated to
+   *  prevent a RELAY_SECRET-holder from kicking other users off push. */
   async function disablePush(relayBase) {
     const state = _loadPush();
     if (state && Array.isArray(state.registered)) {
+      const tokens = loadTokens();
       for (const e of state.registered) {
         try {
-          await api(relayBase, "push_unsubscribe", { method: "POST",
-            body: { token_hash: e.token_hash, id: e.sub_id } });
+          const body = { token_hash: e.token_hash, id: e.sub_id };
+          const tok = tokens.find(t => t.id === e.token_id);
+          if (tok) {
+            // If the matching token is still local, prove possession.
+            // If it was deleted, omit — the relay rejects with 401 but
+            // we still wipe local state below (best-effort).
+            body.trigger_secret_hex = await triggerSecretHex(tok.token_hex);
+          }
+          await api(relayBase, "push_unsubscribe", { method: "POST", body });
         } catch (err) { /* best-effort */ }
       }
     }

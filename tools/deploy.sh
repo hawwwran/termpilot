@@ -17,18 +17,17 @@ resolve_ftp_credentials
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")"/.. && pwd)/relay"
 BACKUP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")"/.. && pwd)/server-logs/backup-$(date +%Y%m%dT%H%M%S)"
 
-# TLS is required (--ssl-reqd). Many shared hosts present a cert chain
-# that doesn't match the FTP hostname (the cert is for the underlying
-# cluster host, not ftp.yourdomain), so verification is OFF by default
-# and the connection is "TLS but trust whoever answers". Set
-# TERMPILOT_FTPS_VERIFY=1 to enable strict cert verification once your host
-# serves a matching cert. A MITM at deploy time can otherwise replace
-# relay.php with a token-logging variant — accept this tradeoff
-# knowingly and harden when the host catches up.
+# TLS is required (--ssl-reqd) AND cert verification is ON by default.
+# A MITM at deploy time can otherwise replace relay.php with a token-
+# logging variant. Some shared hosts present a cert chain that doesn't
+# match the FTP hostname (the cert is for the underlying cluster host,
+# not ftp.yourdomain) — in that case set TERMPILOT_FTPS_INSECURE=1 to
+# drop verification, but treat that as an opt-in to a "TLS but trust
+# whoever answers" mode and only do it from networks you trust.
 CURL_FLAGS=(--ssl-reqd --connect-timeout 15 --max-time 120)
-if [[ "${TERMPILOT_FTPS_VERIFY:-}" == "1" ]]; then
-  echo "INFO: TERMPILOT_FTPS_VERIFY=1 — FTPS cert verification enabled" >&2
-else
+if [[ "${TERMPILOT_FTPS_INSECURE:-}" == "1" ]]; then
+  echo "WARNING: TERMPILOT_FTPS_INSECURE=1 — FTPS cert verification DISABLED" >&2
+  echo "         A MITM on this path can swap relay.php for a token-logger." >&2
   CURL_FLAGS+=(--insecure)
 fi
 CURL=(curl -sS --netrc "${CURL_FLAGS[@]}")

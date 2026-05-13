@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import ssl
 import subprocess
 import sys
@@ -85,6 +86,15 @@ def _semver_tuple(s):
     return tuple(out)
 
 
+# Tags are interpolated into shell command strings on Windows (the cmd.exe
+# update-banner injection in termpilot-win-wrap._wrap_shell_for_banner) and
+# rendered on stderr on Linux. The only legitimate forms upstream uses are
+# `vMAJOR.MINOR.PATCH` and the occasional `-rcN` suffix. Refuse anything else
+# at the boundary so a hypothetical malicious tag_name (compromised release
+# uploader, MITM-without-TLS-pinning) can't smuggle cmd metacharacters.
+_TAG_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+
+
 def _fetch_latest_tag(timeout: float = 15.0):
     """Hit the GitHub API for the latest release. Returns tag str or None."""
     try:
@@ -96,7 +106,7 @@ def _fetch_latest_tag(timeout: float = 15.0):
         with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
             data = json.loads(r.read().decode("utf-8"))
         tag = data.get("tag_name")
-        if isinstance(tag, str) and tag:
+        if isinstance(tag, str) and _TAG_RE.fullmatch(tag):
             return tag
     except (urllib.error.URLError, OSError, ValueError):
         pass

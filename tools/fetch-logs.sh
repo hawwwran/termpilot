@@ -17,13 +17,13 @@ resolve_ftp_credentials
 REMOTE_DIR="${TERMPILOT_FTP_LOG_DIR:-/logs}"
 LOCAL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")"/.. && pwd)/server-logs"
 
-# TLS is required (--ssl-reqd). See tools/deploy.sh for the reasoning
-# on why cert verification is OFF by default (shared-host cert mismatch).
-# Set TERMPILOT_FTPS_VERIFY=1 once your host serves a matching cert.
+# TLS is required (--ssl-reqd) AND cert verification is ON by default.
+# Set TERMPILOT_FTPS_INSECURE=1 to opt into "TLS but trust whoever
+# answers" mode if your shared host serves a mismatched cert chain.
+# See tools/deploy.sh for the rationale.
 CURL_FLAGS=(--ssl-reqd --connect-timeout 15 --max-time 60)
-if [[ "${TERMPILOT_FTPS_VERIFY:-}" == "1" ]]; then
-  echo "INFO: TERMPILOT_FTPS_VERIFY=1 — FTPS cert verification enabled" >&2
-else
+if [[ "${TERMPILOT_FTPS_INSECURE:-}" == "1" ]]; then
+  echo "WARNING: TERMPILOT_FTPS_INSECURE=1 — FTPS cert verification DISABLED" >&2
   CURL_FLAGS+=(--insecure)
 fi
 CURL=(curl -sS --netrc "${CURL_FLAGS[@]}")

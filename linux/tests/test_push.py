@@ -266,7 +266,7 @@ class PushRelayTest(unittest.TestCase):
 
     def test_subscribe_then_unsubscribe(self):
         th = self._fake_token_hash(b"sub1")
-        tid, _ = self._fake_trigger_pair(b"sub1")
+        tid, secret = self._fake_trigger_pair(b"sub1")
         st, body = self._request("POST", "push_subscribe", body={
             "token_hash": th,
             "trigger_id_hex": tid,
@@ -289,9 +289,27 @@ class PushRelayTest(unittest.TestCase):
         })
         self.assertEqual(st, 200)
         self.assertEqual(body2["id"], sub_id)
-        # Unsubscribe.
+        # Unsubscribe requires trigger_secret_hex (gate added alongside
+        # the existing push_notify gate so a RELAY_SECRET-holder can't
+        # kick someone's browser off push by learning their sub_id).
+        # Missing → 400 (require_hex_64).
         st, _ = self._request("POST", "push_unsubscribe", body={
             "token_hash": th, "id": sub_id,
+        })
+        self.assertEqual(st, 400)
+        self.assertTrue(f.exists(), "file must NOT be deleted on missing secret")
+        # Wrong secret → 401.
+        _, wrong_secret = self._fake_trigger_pair(b"sub-different")
+        st, _ = self._request("POST", "push_unsubscribe", body={
+            "token_hash": th, "id": sub_id,
+            "trigger_secret_hex": wrong_secret,
+        })
+        self.assertEqual(st, 401)
+        self.assertTrue(f.exists(), "file must NOT be deleted on wrong secret")
+        # Correct secret → 200, file gone.
+        st, _ = self._request("POST", "push_unsubscribe", body={
+            "token_hash": th, "id": sub_id,
+            "trigger_secret_hex": secret,
         })
         self.assertEqual(st, 200)
         self.assertFalse(f.exists())

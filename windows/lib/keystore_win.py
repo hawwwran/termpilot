@@ -155,29 +155,42 @@ def _keyring_delete() -> bool:
 
 
 def _lock_acl_owner_only(path: Path) -> None:
-    """Best-effort: remove inherited ACEs and grant only the current user
-    full control. icacls is part of base Windows; if it's missing we
-    silently leave the file at its default ACL (still under %APPDATA%,
-    which is per-user). Anything more aggressive (DACL via win32security)
-    would pull in pywin32.
+    """Remove inherited ACEs and grant only the current user full control.
+    icacls is part of base Windows; if it's missing or fails, we warn
+    and leave the file at its default ACL (still under %APPDATA%, which
+    is per-user on a normal profile). Anything more aggressive (DACL via
+    win32security) would pull in pywin32.
     """
+    user = os.environ.get("USERNAME") or ""
+    if not user:
+        sys.stderr.write(
+            f"WARNING: USERNAME not set in env; cannot ACL-tighten "
+            f"{path} (keeping default ACL).\n"
+        )
+        return
     try:
-        user = os.environ.get("USERNAME") or ""
-        if not user:
-            return
         # Disable inheritance, drop existing ACEs, grant the user (F)ull.
-        # /Q quiets, /C continues on partial errors.
-        subprocess.run(
+        r1 = subprocess.run(
             ["icacls", str(path), "/inheritance:r"],
             check=False, capture_output=True,
         )
-        subprocess.run(
+        r2 = subprocess.run(
             ["icacls", str(path), "/grant", f"{user}:F"],
             check=False, capture_output=True,
         )
+        if r1.returncode != 0 or r2.returncode != 0:
+            sys.stderr.write(
+                f"WARNING: icacls hardening failed for {path} "
+                f"(inheritance:r rc={r1.returncode}, "
+                f"grant rc={r2.returncode}). The file is under %APPDATA% "
+                f"so the default ACL still limits to your user on a "
+                f"normal profile; tighten manually if running on a "
+                f"shared host.\n"
+            )
     except FileNotFoundError:
-        # icacls not on PATH — give up silently.
-        pass
+        sys.stderr.write(
+            f"WARNING: icacls not on PATH; {path} keeps default ACL.\n"
+        )
 
 
 def _file_get() -> Optional[bytes]:

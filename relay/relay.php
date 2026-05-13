@@ -380,6 +380,17 @@ function op_resize(string $dataDir): void {
     $sid = require_sid($body);
     $dir = session_dir_or_404($dataDir, $sid);
     $meta = read_public_meta($dir);
+    // Trigger-secret gate (same shape as op_close): RELAY_SECRET alone is
+    // insufficient — a co-tenant holding it could otherwise mutate any
+    // session's cols/rows. The legacy carve-out covers sessions registered
+    // before trigger_id_hex became mandatory in op_register; new sessions
+    // always carry the verifier.
+    if (!empty($meta['trigger_id_hex'])) {
+        $triggerSecretHex = require_hex_64($body, 'trigger_secret_hex');
+        if (!verify_trigger_secret($triggerSecretHex, (string)$meta['trigger_id_hex'])) {
+            json_err(401, 'bad trigger_secret');
+        }
+    }
     $meta['cols'] = clamp_int((int)($body['cols'] ?? ($meta['cols'] ?? 80)), 20, 500);
     $meta['rows'] = clamp_int((int)($body['rows'] ?? ($meta['rows'] ?? 24)), 8, 200);
     $meta['last_seen'] = time();
@@ -391,6 +402,19 @@ function op_heartbeat(string $dataDir): void {
     $body = json_in();
     $sid = require_sid($body);
     $dir = session_dir_or_404($dataDir, $sid);
+    $meta = read_public_meta($dir);
+    // Trigger-secret gate: prevents a RELAY_SECRET-holder from artificially
+    // keeping someone else's session alive past its natural GC point.
+    // (The GET-input long-poll path also bumps last_seen and is not gated
+    // — gating heartbeat closes the explicit-endpoint hole; gating the
+    // poll would require a per-request secret in a URL we'd rather not
+    // log everywhere. Documented imperfection.)
+    if (!empty($meta['trigger_id_hex'])) {
+        $triggerSecretHex = require_hex_64($body, 'trigger_secret_hex');
+        if (!verify_trigger_secret($triggerSecretHex, (string)$meta['trigger_id_hex'])) {
+            json_err(401, 'bad trigger_secret');
+        }
+    }
     touch_public_meta($dir);
     json_ok(['ok' => true]);
 }
@@ -642,7 +666,20 @@ function op_push_unsubscribe(string $dataDir): void {
     $subId = (string)($body['id'] ?? '');
     if (!preg_match('/^[a-f0-9]{64}$/', $tokenHash)) { json_err(400, 'bad token_hash'); }
     if (!preg_match('/^[a-f0-9]{32}$/', $subId)) { json_err(400, 'bad id'); }
-    $f = $dataDir . '/push/' . $tokenHash . '/' . $subId . '.json';
+    $dir = $dataDir . '/push/' . $tokenHash;
+    // Trigger-secret gate: stops a RELAY_SECRET-holder from kicking
+    // someone else's browser off push by guessing/learning their sub_id.
+    // If no .trigger_id is on disk yet, no one has ever subscribed under
+    // this token_hash — the call is a no-op anyway, so let it pass.
+    $tidPath = $dir . '/.trigger_id';
+    if (file_exists($tidPath)) {
+        $triggerSecretHex = require_hex_64($body, 'trigger_secret_hex');
+        $stored = trim((string)@file_get_contents($tidPath));
+        if (!verify_trigger_secret($triggerSecretHex, $stored)) {
+            json_err(401, 'bad trigger_secret');
+        }
+    }
+    $f = $dir . '/' . $subId . '.json';
     if (file_exists($f)) { @unlink($f); }
     json_ok(['ok' => true]);
 }
@@ -812,13 +849,26 @@ function der_ecdsa_to_jose(string $der): string {
 }
 
 function send_vapid_push(string $endpoint, string $jwt, string $pubB64u): array {
-    // Re-validate at send time: DNS could have rebound to a private IP
-    // between subscribe and now, or the subscription file could have
-    // been seeded with a pre-allowlist endpoint. Skip silently rather
-    // than aborting the whole notify loop on one bad entry.
-    if (validate_push_endpoint($endpoint) !== null) {
+    // Re-validate at send time AND resolve our own IPs that we then pin
+    // into curl via CURLOPT_RESOLVE. Without the pin, there's a TOCTOU
+    // window between validate_push_endpoint's DNS lookup and curl's own
+    // resolution — a DNS rebinder controlling a push hostname could slip
+    // a private IP through that window. Pinning forces curl to connect
+    // to the addresses we already filtered.
+    $ips = _resolve_safe_ips_for_send($endpoint);
+    if ($ips === null) {
         return ['code' => 0, 'body' => 'endpoint rejected at send time'];
     }
+    $p = @parse_url($endpoint);
+    $host = strtolower((string)($p['host'] ?? ''));
+    $port = isset($p['port']) ? (int)$p['port'] : 443;
+    if ($host === '') {
+        return ['code' => 0, 'body' => 'endpoint rejected at send time'];
+    }
+    // CURLOPT_RESOLVE format: "HOST:PORT:IP[,IP,...]". Pass one entry that
+    // lists every validated IP so curl falls forward through them if any
+    // one connection fails.
+    $resolveEntries = [$host . ':' . $port . ':' . implode(',', $ips)];
     $ch = curl_init($endpoint);
     if ($ch === false) { return ['code' => 0, 'body' => '']; }
     curl_setopt_array($ch, [
@@ -833,11 +883,53 @@ function send_vapid_push(string $endpoint, string $jwt, string $pubB64u): array 
         CURLOPT_TIMEOUT => 10,
         CURLOPT_CONNECTTIMEOUT => 5,
         CURLOPT_FOLLOWLOCATION => false,
+        CURLOPT_RESOLVE => $resolveEntries,
     ]);
     $body = curl_exec($ch);
     $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
     curl_close($ch);
     return ['code' => $code, 'body' => is_string($body) ? $body : ''];
+}
+
+// Resolve an endpoint's host to a list of "safe" IPs (not private,
+// not reserved, both v4 and v6). Returns null if validate_push_endpoint
+// rejects the URL OR if any resolved address fails the safety filter
+// (fail-closed — one private record in a recordset is treated as the
+// whole hostname being compromised).
+function _resolve_safe_ips_for_send(string $url): ?array {
+    if (validate_push_endpoint($url) !== null) return null;
+    $p = @parse_url($url);
+    if (!$p || empty($p['host'])) return null;
+    $host = strtolower((string)$p['host']);
+    return _resolve_host_safe_ips($host);
+}
+
+// Resolve $host via DNS_A | DNS_AAAA and return [ip, ...] only if every
+// returned address passes _push_ip_safe. Returns null on resolve failure
+// or any unsafe IP. PUSH_ALLOW_INSECURE_DEV bypasses the IP safety check
+// so the test suite's mock server on 127.0.0.1 isn't filtered out.
+function _resolve_host_safe_ips(string $host): ?array {
+    $dev = defined('PUSH_ALLOW_INSECURE_DEV') && PUSH_ALLOW_INSECURE_DEV;
+    // Host might already be a literal IP (the test mock uses 127.0.0.1);
+    // dns_get_record returns nothing useful for IP literals so handle
+    // them inline.
+    if (filter_var($host, FILTER_VALIDATE_IP)) {
+        if (!$dev && !_push_ip_safe($host)) return null;
+        return [$host];
+    }
+    $records = @dns_get_record($host, DNS_A | DNS_AAAA);
+    if (!is_array($records) || empty($records)) return null;
+    $ips = [];
+    foreach ($records as $r) {
+        $ip = $r['ip'] ?? $r['ipv6'] ?? null;
+        if (!$ip) continue;
+        // Fail-closed (production): any private/reserved record poisons
+        // the whole hostname for this request. A rebinder could otherwise
+        // return [safe, unsafe] and rely on curl picking the unsafe one.
+        if (!$dev && !_push_ip_safe($ip)) return null;
+        $ips[] = $ip;
+    }
+    return empty($ips) ? null : $ips;
 }
 
 function endpoint_origin(string $url): string {
@@ -894,11 +986,19 @@ function validate_push_endpoint(string $url): ?string {
     $port = isset($p['port']) ? (int)$p['port'] : 443;
     if ($port !== 443) return 'endpoint port must be 443';
     if (!_push_host_allowed($host)) return 'endpoint host not in allowlist';
-    $ips = @gethostbynamel($host);
-    if (!$ips) return 'endpoint host unresolvable';
-    foreach ($ips as $ip) {
+    // dns_get_record covers BOTH A and AAAA — gethostbynamel was v4-only
+    // and would happily skip an AAAA pointing at fc00::/7 or fe80::/10,
+    // letting a rebinder slip a ULA / link-local v6 through.
+    $records = @dns_get_record($host, DNS_A | DNS_AAAA);
+    if (!is_array($records) || empty($records)) return 'endpoint host unresolvable';
+    $any = false;
+    foreach ($records as $r) {
+        $ip = $r['ip'] ?? $r['ipv6'] ?? null;
+        if (!$ip) continue;
+        $any = true;
         if (!_push_ip_safe($ip)) return 'endpoint host resolves to a private/reserved IP';
     }
+    if (!$any) return 'endpoint host unresolvable';
     return null;
 }
 

@@ -350,16 +350,36 @@ def cmd_set_relay_secret(args):
             pass
         sys.stderr.write(f"termpilot: cannot write {SECRET_FILE}: {e}\n")
         return 1
-    # Best-effort ACL tighten — same call shape as the keystore.
+    # ACL tighten — verify each step. Silently failing here would leave
+    # the secret with default-inherited ACLs (still per-user under
+    # %APPDATA% on a normal profile, but loose on shared profiles). We
+    # don't abort on failure because the file is already written and
+    # broken icacls shouldn't break --set-relay-secret; just be loud.
     try:
         user = os.environ.get("USERNAME") or ""
         if user:
-            subprocess.run(["icacls", SECRET_FILE, "/inheritance:r"],
-                           check=False, capture_output=True)
-            subprocess.run(["icacls", SECRET_FILE, "/grant", f"{user}:F"],
-                           check=False, capture_output=True)
+            r1 = subprocess.run(["icacls", SECRET_FILE, "/inheritance:r"],
+                                check=False, capture_output=True)
+            r2 = subprocess.run(["icacls", SECRET_FILE, "/grant", f"{user}:F"],
+                                check=False, capture_output=True)
+            if r1.returncode != 0 or r2.returncode != 0:
+                sys.stderr.write(
+                    f"WARNING: icacls hardening failed for {SECRET_FILE} "
+                    f"(inheritance:r rc={r1.returncode}, "
+                    f"grant rc={r2.returncode}). The file is under %APPDATA% "
+                    f"so the default ACL still limits to your user on a "
+                    f"normal profile; tighten manually if running on a "
+                    f"shared host.\n"
+                )
+        else:
+            sys.stderr.write(
+                f"WARNING: USERNAME not set in env; cannot ACL-tighten "
+                f"{SECRET_FILE} (keeping default ACL).\n"
+            )
     except FileNotFoundError:
-        pass
+        sys.stderr.write(
+            f"WARNING: icacls not on PATH; {SECRET_FILE} keeps default ACL.\n"
+        )
     sys.stdout.write(f"Saved {SECRET_FILE}.\n")
     return 0
 
@@ -973,8 +993,12 @@ def cmd_run(argv):
                 backoff.reset()
             except urllib.error.HTTPError as e:
                 if e.code == 409:
+                    # Bounded read: a hostile relay could otherwise ship
+                    # an unbounded body on 409 and OOM the wrapper. 64 KiB
+                    # is ~3 orders of magnitude over the legit JSON
+                    # {expected_seq, got_seq, error}.
                     try:
-                        info = json.loads(e.read().decode("utf-8"))
+                        info = json.loads(e.read(65536).decode("utf-8"))
                         expected = int(info.get("expected_seq", seq + 1))
                     except Exception:
                         expected = seq + 1
@@ -1066,10 +1090,14 @@ def cmd_run(argv):
             if stop.is_set():
                 return
             _safely(relay.request, "POST", "heartbeat",
-                    body={"session_id": sid}, timeout=10)
+                    body={"session_id": sid,
+                          "trigger_secret_hex": trigger_secret_hex},
+                    timeout=10)
 
     # Resize watcher — Windows has no SIGWINCH. We poll the console size
     # every second and resize the PTY + relay if it changed.
+    # trigger_secret_hex proves token possession to the relay so a bare
+    # RELAY_SECRET-holder can't mutate someone else's cols/rows.
     def resize_watcher():
         last = (init_cols, init_rows)
         while not stop.is_set():
@@ -1080,7 +1108,8 @@ def cmd_run(argv):
                 child.resize(cols, rows)
                 threading.Thread(target=lambda: _safely(
                     relay.request, "POST", "resize",
-                    body={"session_id": sid, "cols": cols, "rows": rows},
+                    body={"session_id": sid, "cols": cols, "rows": rows,
+                          "trigger_secret_hex": trigger_secret_hex},
                     timeout=5,
                 ), daemon=True).start()
                 last = cur

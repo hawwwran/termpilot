@@ -310,6 +310,14 @@ def cleanup_stale_sid_dirs(keep_sid: str, max_age_secs: int = 7 * 24 * 3600) -> 
     base = os.path.join(CACHE_BASE, "sid")
     if not os.path.isdir(base):
         return
+    # Defense-in-depth: under 0700 perms a non-owner can't plant a symlink
+    # here, but if one ever appeared, shutil.rmtree would refuse a link at
+    # the root and we'd skip it anyway. The realpath check makes intent
+    # explicit and mirrors the relay's op_gc sanity check.
+    try:
+        real_base = os.path.realpath(base)
+    except OSError:
+        return
     now = time.time()
     try:
         names = os.listdir(base)
@@ -319,6 +327,12 @@ def cleanup_stale_sid_dirs(keep_sid: str, max_age_secs: int = 7 * 24 * 3600) -> 
         if name == keep_sid:
             continue
         d = os.path.join(base, name)
+        try:
+            real_d = os.path.realpath(d)
+        except OSError:
+            continue
+        if real_d != real_base and not real_d.startswith(real_base + os.sep):
+            continue
         try:
             if now - os.path.getmtime(d) <= max_age_secs:
                 continue
@@ -989,27 +1003,39 @@ def _resolve_auth_secret(arg_value: str | None) -> str | None:
     if env:
         return env
     p = SECRET_FILE
-    if not os.path.exists(p):
-        return None
-    # Sanity-check perms — the README tells users to chmod 600, but if
-    # the file came through `cp -p` from a world-readable source the
-    # secret leaks. Refuse to load it loose; tell the user how to fix.
-    try:
-        st = os.stat(p)
-    except OSError:
-        return None
     import stat as _stat
-    if st.st_mode & (_stat.S_IRWXG | _stat.S_IRWXO):
-        sys.stderr.write(
-            f"WARNING: {p} has loose permissions "
-            f"({oct(_stat.S_IMODE(st.st_mode))}); refusing to load. "
-            f"Run: chmod 600 {p}\n"
-        )
+    # O_NOFOLLOW: refuse to open a symlink at this path. The parent dir
+    # is mode 0700, so only the user themselves could plant one — but
+    # without the flag, os.stat() + open() would happily traverse a link
+    # to e.g. a 0600 system file and return its contents. fstat() on the
+    # opened fd then checks perms on the actual inode (no TOCTOU between
+    # the perms check and the read).
+    try:
+        fd = os.open(p, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        if e.errno == errno.ELOOP:
+            sys.stderr.write(
+                f"WARNING: {p} is a symlink; refusing to load. "
+                f"Remove and re-run --set-relay-secret.\n"
+            )
         return None
     try:
-        return open(p).read().strip()
+        st = os.fstat(fd)
+        if st.st_mode & (_stat.S_IRWXG | _stat.S_IRWXO):
+            sys.stderr.write(
+                f"WARNING: {p} has loose permissions "
+                f"({oct(_stat.S_IMODE(st.st_mode))}); refusing to load. "
+                f"Run: chmod 600 {p}\n"
+            )
+            return None
+        return os.read(fd, 65536).decode("utf-8").strip()
     except OSError:
         return None
+    finally:
+        try: os.close(fd)
+        except OSError: pass
 
 
 def get_winsize(fd: int) -> bytes:
@@ -1416,9 +1442,13 @@ def cmd_run(argv):
             set_winsize(master, ws)
             rows, cols, _, _ = struct.unpack("HHHH", ws)
             # Push public size to the relay so browsers can match xterm cols.
+            # trigger_secret_hex proves token possession — the relay refuses
+            # resize from a bare RELAY_SECRET-holder (defense against a
+            # co-tenant mutating someone else's session metadata).
             threading.Thread(target=lambda: _safely(
                 relay.request, "POST", "resize",
-                body={"session_id": sid, "cols": cols, "rows": rows},
+                body={"session_id": sid, "cols": cols, "rows": rows,
+                      "trigger_secret_hex": trigger_secret_hex},
                 timeout=5,
             ), daemon=True).start()
             try: os.kill(pid, signal.SIGWINCH)
@@ -1513,8 +1543,12 @@ def cmd_run(argv):
                     # Server says expected_seq is X. Drop pending entries the
                     # server already accepted (seq < expected_seq); keep the
                     # rest and resume at expected_seq.
+                    # Bounded read: a hostile relay could otherwise ship an
+                    # unbounded body on 409 and OOM the wrapper. 64 KiB is
+                    # ~3 orders of magnitude over the legit payload (a tiny
+                    # JSON {expected_seq, got_seq, error}).
                     try:
-                        info = json.loads(e.read().decode("utf-8"))
+                        info = json.loads(e.read(65536).decode("utf-8"))
                         expected = int(info.get("expected_seq", seq + 1))
                     except Exception:
                         expected = seq + 1
@@ -1626,7 +1660,9 @@ def cmd_run(argv):
             time.sleep(15)
             if stop.is_set(): return
             _safely(relay.request, "POST", "heartbeat",
-                    body={"session_id": sid}, timeout=10)
+                    body={"session_id": sid,
+                          "trigger_secret_hex": trigger_secret_hex},
+                    timeout=10)
 
     threading.Thread(target=output_uploader, daemon=True).start()
     threading.Thread(target=input_poller, daemon=True).start()

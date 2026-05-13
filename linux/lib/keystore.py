@@ -22,6 +22,7 @@ Public API:
 """
 from __future__ import annotations
 
+import errno
 import os
 import stat
 import sys
@@ -166,11 +167,24 @@ def _keyring_delete() -> bool:
 
 
 def _file_get() -> Optional[bytes]:
-    if not TOKEN_FILE.exists():
+    # O_NOFOLLOW + fstat: refuse to read a symlink at this path, and
+    # check perms on the actual inode we have open (no TOCTOU between
+    # the perms check and the read). Without the flag, Path.stat() and
+    # read_text() would happily traverse a link planted by a local
+    # attacker into something readable but not theirs.
+    try:
+        fd = os.open(str(TOKEN_FILE), os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        if e.errno == errno.ELOOP:
+            sys.stderr.write(
+                f"WARNING: {TOKEN_FILE} is a symlink; refusing to load. "
+                f"Remove and re-run --generate-token.\n"
+            )
         return None
     try:
-        # Sanity-check perms; refuse to load a token from a world-readable file.
-        st = TOKEN_FILE.stat()
+        st = os.fstat(fd)
         if st.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
             sys.stderr.write(
                 f"WARNING: {TOKEN_FILE} has loose permissions "
@@ -178,11 +192,14 @@ def _file_get() -> Optional[bytes]:
                 f"Run: chmod 600 {TOKEN_FILE}\n"
             )
             return None
-        hex_str = TOKEN_FILE.read_text().strip()
+        hex_str = os.read(fd, 65536).decode("ascii").strip()
         return crypto.hex_to_token(hex_str)
     except Exception as e:
         sys.stderr.write(f"WARNING: couldn't load token from {TOKEN_FILE}: {e}\n")
         return None
+    finally:
+        try: os.close(fd)
+        except OSError: pass
 
 
 def _file_set(token_bytes: bytes) -> None:

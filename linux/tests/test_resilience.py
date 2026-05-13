@@ -327,11 +327,28 @@ class RelayResilienceTest(unittest.TestCase):
         self.assertIsNotNone(s2, "stale session must REMAIN visible (not hidden)")
         self.assertFalse(s2["alive"], "after TTL the session should be alive=false")
         self.assertGreaterEqual(s2["offline_secs"], 2)
-        # Heartbeat → alive again.
-        st, _ = self._request("POST", "heartbeat", body={"session_id": sid})
+        # Heartbeat → alive again. Heartbeat is trigger-secret gated to
+        # stop a RELAY_SECRET-holder from artificially keeping someone
+        # else's session alive; pass the matching secret here.
+        tok = crypto.derive_token("p")
+        secret_hex = crypto.derive_trigger_secret(tok).hex()
+        st, _ = self._request("POST", "heartbeat", body={
+            "session_id": sid,
+            "trigger_secret_hex": secret_hex,
+        })
         self.assertEqual(st, 200)
         s3 = self._session(sid)
         self.assertTrue(s3["alive"], "heartbeat must restore alive=true")
+        # Negative: heartbeat without the trigger_secret must be rejected
+        # (the new gate added alongside op_close's existing one).
+        st, _ = self._request("POST", "heartbeat", body={"session_id": sid})
+        self.assertEqual(st, 400, "missing trigger_secret_hex must be 400 (require_hex_64)")
+        # Wrong trigger_secret → 401.
+        bad = crypto.derive_trigger_secret(crypto.derive_token("other")).hex()
+        st, _ = self._request("POST", "heartbeat", body={
+            "session_id": sid, "trigger_secret_hex": bad,
+        })
+        self.assertEqual(st, 401, "wrong trigger_secret_hex must be 401")
 
     def test_gc_requires_admin_auth(self):
         # No auth at all

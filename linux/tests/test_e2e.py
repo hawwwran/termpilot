@@ -260,6 +260,43 @@ class E2ETest(unittest.TestCase):
             # Same blob, wrong AAD (stream='in') — GCM rejects.
             self.crypto.decrypt_b64(recs[0]["blob"], crypto.aad_record("in", sid, 0))
 
+    def test_07_seq_conflict_returns_409(self):
+        """POSTing a record at a seq that's already taken MUST return 409
+        with expected_seq pointing at the next free slot. This is the
+        load-bearing dedup primitive — without it, a retried POST after
+        a timeout (where the relay actually got the first attempt) would
+        write a duplicate at the wrong AAD seq and cascade-break decrypt
+        for the whole stream. The wrapper's uploader thread relies on
+        this exact contract (resync next_seq + drop accepted entries)."""
+        sid = "ababab9999cc"
+        self._register(sid)
+        blob = self.crypto.encrypt_b64(b"first", crypto.aad_record("out", sid, 0))
+        status, body = self.http.post("output", {
+            "session_id": sid,
+            "records": [{"seq": 0, "blob": blob}],
+        })
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body.get("next_seq"), 1)
+        # Same seq again, valid blob → 409 with the verdict the wrapper
+        # needs to resync from.
+        blob2 = self.crypto.encrypt_b64(b"dup", crypto.aad_record("out", sid, 0))
+        status, body = self.http.post("output", {
+            "session_id": sid,
+            "records": [{"seq": 0, "blob": blob2}],
+        })
+        self.assertEqual(status, 409, body)
+        self.assertEqual(body.get("error"), "seq_conflict")
+        self.assertEqual(body.get("expected_seq"), 1)
+        self.assertEqual(body.get("got_seq"), 0)
+        # Resuming at expected_seq works.
+        blob3 = self.crypto.encrypt_b64(b"second", crypto.aad_record("out", sid, 1))
+        status, body = self.http.post("output", {
+            "session_id": sid,
+            "records": [{"seq": 1, "blob": blob3}],
+        })
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body.get("next_seq"), 2)
+
     # ---- Helpers ----------------------------------------------------------
 
     def _register(self, sid: str, password: str = PASSWORD):

@@ -294,6 +294,14 @@ def cleanup_stale_sid_dirs(keep_sid: str, max_age_secs: int = 7 * 24 * 3600) -> 
     base = os.path.join(CACHE_BASE, "sid")
     if not os.path.isdir(base):
         return
+    # Defense-in-depth: if a junction / symlink ever appeared under sid/,
+    # rmtree would otherwise traverse it. Realpath-canonicalise and skip
+    # anything whose target escapes the cache base. Mirrors the relay's
+    # op_gc sanity check.
+    try:
+        real_base = os.path.realpath(base)
+    except OSError:
+        return
     now = time.time()
     try:
         names = os.listdir(base)
@@ -303,6 +311,12 @@ def cleanup_stale_sid_dirs(keep_sid: str, max_age_secs: int = 7 * 24 * 3600) -> 
         if name == keep_sid:
             continue
         d = os.path.join(base, name)
+        try:
+            real_d = os.path.realpath(d)
+        except OSError:
+            continue
+        if real_d != real_base and not real_d.startswith(real_base + os.sep):
+            continue
         try:
             if now - os.path.getmtime(d) <= max_age_secs:
                 continue
