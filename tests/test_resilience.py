@@ -159,19 +159,19 @@ class WrapperLockTests(unittest.TestCase):
         shutil.rmtree(self.cache, ignore_errors=True)
 
     def test_acquire_twice_in_same_process_blocks_second(self):
-        fd1 = ccwrap.acquire_wrapper_lock(self.cwd)
+        fd1 = ccwrap.acquire_wrapper_lock(self.cwd, "default")
         self.assertIsNotNone(fd1)
-        fd2 = ccwrap.acquire_wrapper_lock(self.cwd)
+        fd2 = ccwrap.acquire_wrapper_lock(self.cwd, "default")
         self.assertIsNone(fd2, "second acquire should fail while first holds")
         ccwrap.release_wrapper_lock(fd1)
         # After release, acquire works again.
-        fd3 = ccwrap.acquire_wrapper_lock(self.cwd)
+        fd3 = ccwrap.acquire_wrapper_lock(self.cwd, "default")
         self.assertIsNotNone(fd3)
         ccwrap.release_wrapper_lock(fd3)
 
     def test_lock_is_per_cwd(self):
-        fd1 = ccwrap.acquire_wrapper_lock("/tmp/cwd-a")
-        fd2 = ccwrap.acquire_wrapper_lock("/tmp/cwd-b")
+        fd1 = ccwrap.acquire_wrapper_lock("/tmp/cwd-a", "default")
+        fd2 = ccwrap.acquire_wrapper_lock("/tmp/cwd-b", "default")
         try:
             self.assertIsNotNone(fd1)
             self.assertIsNotNone(fd2)
@@ -192,27 +192,27 @@ class ActiveJsonTests(unittest.TestCase):
         shutil.rmtree(self.cache, ignore_errors=True)
 
     def test_read_missing_returns_empty(self):
-        self.assertEqual(ccwrap.read_active_json(self.cwd), {})
+        self.assertEqual(ccwrap.read_active_json(self.cwd, "default"), {})
 
     def test_write_then_read_round_trip(self):
-        ccwrap.write_active_json(self.cwd, wrapper_sid="abc123",
-                                 marker_b64="m1")
-        d = ccwrap.read_active_json(self.cwd)
+        ccwrap.write_active_json(self.cwd, "default",
+                                 wrapper_sid="abc123", marker_b64="m1")
+        d = ccwrap.read_active_json(self.cwd, "default")
         self.assertEqual(d.get("wrapper_sid"), "abc123")
         self.assertEqual(d.get("marker_b64"), "m1")
         self.assertIsInstance(d.get("ts"), int)
 
     def test_writes_merge_fields(self):
-        ccwrap.write_active_json(self.cwd, wrapper_sid="sid-1")
-        ccwrap.write_active_json(self.cwd, marker_b64="m1")
-        d = ccwrap.read_active_json(self.cwd)
+        ccwrap.write_active_json(self.cwd, "default", wrapper_sid="sid-1")
+        ccwrap.write_active_json(self.cwd, "default", marker_b64="m1")
+        d = ccwrap.read_active_json(self.cwd, "default")
         self.assertEqual(d.get("wrapper_sid"), "sid-1")
         self.assertEqual(d.get("marker_b64"), "m1")
 
     def test_clear_removes_file(self):
-        ccwrap.write_active_json(self.cwd, wrapper_sid="x")
-        ccwrap.clear_active_json(self.cwd)
-        self.assertEqual(ccwrap.read_active_json(self.cwd), {})
+        ccwrap.write_active_json(self.cwd, "default", wrapper_sid="x")
+        ccwrap.clear_active_json(self.cwd, "default")
+        self.assertEqual(ccwrap.read_active_json(self.cwd, "default"), {})
 
 
 # ============================================================================

@@ -22,6 +22,7 @@ run tests/test_keystore.py
 run tests/test_config_gate.py
 run tests/test_e2e.py
 run tests/test_resilience.py
+run tests/test_multi_instance.py
 run tests/test_push.py
 run tests/test_wrapper_e2e.py
 

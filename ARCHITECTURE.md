@@ -30,10 +30,21 @@ The plaintext v1 was scrapped. The current implementation:
   PTY chunks are appended (plaintext, mode 0600) before encrypt+POST; the
   cursor file advances on confirmed delivery. If the wrapper SIGKILLs
   between read and POST, the bytes survive.
-- **Per-cwd single-instance lock** at `~/.cache/termpilot/cwd/<encoded>/wrapper.lock`
-  via `fcntl.LOCK_EX|LOCK_NB`. Prevents two `termpilot`s racing in one cwd.
-  `--force` overrides.
-- **active.json** in the same per-cwd dir tracks `{wrapper_sid, marker_b64, ts, pid}`.
+- **Per-(cwd, instance) single-instance lock** at
+  `~/.cache/termpilot/cwd/<encoded-cwd>/<instance>/wrapper.lock` via
+  `fcntl.LOCK_EX|LOCK_NB`. `<instance>` is resolved in this order
+  (`resolve_instance` in `termpilot-wrap`):
+    1. `--instance NAME` flag,
+    2. `$TERMPILOT_INSTANCE`,
+    3. the controlling TTY of stdin (e.g. `pts-3` on Linux, `ttys003` on macOS),
+    4. literal `"default"` if none of the above yields a valid label.
+  Charset `[a-zA-Z0-9_.-]`, length 1-64; anything else is rejected at
+  startup. Two terminal windows in the same cwd get two distinct pts
+  labels → two independent slots, no flag needed. SIGKILL + rerun in
+  the **same** terminal pane reuses the same pts label and so still
+  triggers crash-recovery within the 5-minute window. `--force` still
+  overrides the lock for stuck-state recovery.
+- **active.json** in the same per-instance dir tracks `{wrapper_sid, marker_b64, ts, pid}`.
   - On wrapper start: if `ts` is < 5 min old (CRASH_RECOVERY_SECS) and the
     spool dir still exists → reuse the sid and replay unsent chunks.
   - Clean exit drops `wrapper_sid` and `marker_b64` (so the next start

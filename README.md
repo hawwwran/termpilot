@@ -188,6 +188,19 @@ If a previous wrapper crashed within the last 5 minutes, the new wrapper
 reuses the same relay session id and replays any unsent output bytes
 from the on-disk spool.
 
+### Running multiple sessions in the same directory
+
+Just open another terminal and run `termpilot` again. Each terminal
+window (or tmux/screen pane) gets its own resilience slot automatically,
+keyed by the controlling TTY's pts label. Crash-recovery still works
+within the same terminal window.
+
+If you want a stable human-readable name instead (handy for telling
+sessions apart in the browser sidebar, or for running from cron / a
+script where there is no TTY), pass `--instance NAME` or set
+`TERMPILOT_INSTANCE=NAME` in the environment. Charset:
+`[a-zA-Z0-9_.-]`, length 1-64.
+
 ## Browser-side (and PWA install)
 
 1. Visit your relay URL.
@@ -257,10 +270,14 @@ termpilot/
 
 The wrapper writes per-cwd state to `~/.cache/termpilot/`:
 
-- `cwd/<encoded-cwd>/wrapper.lock` — single-instance lock per cwd
-- `cwd/<encoded-cwd>/active.json` — last `wrapper_sid` + marker for
+- `cwd/<encoded-cwd>/<instance>/wrapper.lock` — single-instance lock per
+  (cwd, instance). `<instance>` defaults to the controlling TTY's pts
+  label (e.g. `pts-3`), so two terminals in the same cwd get separate
+  slots automatically. Override with `--instance NAME` or
+  `$TERMPILOT_INSTANCE`; falls back to `"default"` for non-TTY stdin.
+- `cwd/<encoded-cwd>/<instance>/active.json` — last `wrapper_sid` + marker for
   crash recovery (re-uses the sid if a wrapper crashed within the last
-  5 minutes)
+  5 minutes in the same slot)
 - `sid/<sid>/out.{spool,cursor,next_seq}` — durable encrypted output
   queue; survives wrapper SIGKILL
 - `events.log` (rotates at 256 KB) — structured JSONL diagnostics.

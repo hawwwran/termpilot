@@ -151,20 +151,54 @@ def _encode_cwd(cwd: str) -> str:
     return hashlib.sha256(cwd.encode("utf-8")).hexdigest()[:16]
 
 
-def cwd_cache_dir(cwd: str) -> str:
-    return os.path.join(CACHE_BASE, "cwd", _encode_cwd(cwd))
+# Instance label = a second key alongside cwd, so multiple wrappers can
+# coexist in the same working directory. Resolved at startup from
+# (in order): --instance flag, $TERMPILOT_INSTANCE, controlling TTY of
+# stdin (e.g. "pts-3"), or the literal "default" if none of the above
+# yields a label. See resolve_instance().
+_INSTANCE_LABEL_RE = re.compile(r"^[a-zA-Z0-9_.-]{1,64}$")
+
+
+def _validate_instance_label(s: str, *, source: str) -> str:
+    if s in (".", "..") or not _INSTANCE_LABEL_RE.fullmatch(s):
+        raise ValueError(f"invalid instance label from {source}: {s!r}")
+    return s
+
+
+def resolve_instance(arg_value: str | None) -> str:
+    """Pick the per-cwd resilience-slot label. See module-level rules above."""
+    if arg_value:
+        return _validate_instance_label(arg_value, source="--instance")
+    env = os.environ.get("TERMPILOT_INSTANCE")
+    if env:
+        return _validate_instance_label(env, source="TERMPILOT_INSTANCE")
+    try:
+        tty = os.ttyname(0)            # /dev/pts/3, /dev/ttys003, ...
+    except OSError:
+        tty = None
+    if tty:
+        label = tty.removeprefix("/dev/").replace("/", "-")
+        try:
+            return _validate_instance_label(label, source="tty")
+        except ValueError:
+            log_event("instance_tty_unsanitary", tty=tty)
+    return "default"
+
+
+def cwd_cache_dir(cwd: str, instance: str) -> str:
+    return os.path.join(CACHE_BASE, "cwd", _encode_cwd(cwd), instance)
 
 
 def sid_cache_dir(sid: str) -> str:
     return os.path.join(CACHE_BASE, "sid", sid)
 
 
-def acquire_wrapper_lock(cwd: str) -> int | None:
-    """fcntl LOCK_EX|LOCK_NB on <cwd-cache>/wrapper.lock. Returns the open
-    file descriptor (callers must keep it alive for the lifetime of the
-    process) or None if another process holds the lock.
+def acquire_wrapper_lock(cwd: str, instance: str) -> int | None:
+    """fcntl LOCK_EX|LOCK_NB on <cwd-cache>/<instance>/wrapper.lock. Returns
+    the open file descriptor (callers must keep it alive for the lifetime
+    of the process) or None if another process holds the lock.
     """
-    d = cwd_cache_dir(cwd)
+    d = cwd_cache_dir(cwd, instance)
     try:
         os.makedirs(d, mode=0o700, exist_ok=True)
         try: os.chmod(d, 0o700)
@@ -218,8 +252,8 @@ def release_wrapper_lock(fd: int | None) -> None:
         pass
 
 
-def read_active_json(cwd: str) -> dict:
-    p = os.path.join(cwd_cache_dir(cwd), "active.json")
+def read_active_json(cwd: str, instance: str) -> dict:
+    p = os.path.join(cwd_cache_dir(cwd, instance), "active.json")
     try:
         with open(p, "r") as f:
             d = json.load(f)
@@ -228,14 +262,14 @@ def read_active_json(cwd: str) -> dict:
         return {}
 
 
-def write_active_json(cwd: str, **fields) -> None:
-    d = cwd_cache_dir(cwd)
+def write_active_json(cwd: str, instance: str, **fields) -> None:
+    d = cwd_cache_dir(cwd, instance)
     try:
         os.makedirs(d, mode=0o700, exist_ok=True)
     except OSError:
         return
     p = os.path.join(d, "active.json")
-    obj = read_active_json(cwd)
+    obj = read_active_json(cwd, instance)
     obj.update(fields)
     obj["ts"] = int(time.time())
     obj["pid"] = os.getpid()
@@ -253,8 +287,8 @@ def write_active_json(cwd: str, **fields) -> None:
         pass
 
 
-def clear_active_json(cwd: str) -> None:
-    p = os.path.join(cwd_cache_dir(cwd), "active.json")
+def clear_active_json(cwd: str, instance: str) -> None:
+    p = os.path.join(cwd_cache_dir(cwd, instance), "active.json")
     try:
         os.unlink(p)
     except OSError:
@@ -285,6 +319,34 @@ def cleanup_stale_sid_dirs(keep_sid: str, max_age_secs: int = 7 * 24 * 3600) -> 
             shutil.rmtree(d)
         except OSError:
             pass
+
+
+def cleanup_legacy_cwd_artifacts(max_age_secs: int = 7 * 24 * 3600) -> None:
+    """Pre-instance layout left active.json + wrapper.lock directly in
+    cwd/<hash>/. The new layout nests them under cwd/<hash>/<instance>/.
+    Sweep leftover files older than max_age_secs so the dir doesn't
+    accumulate forever. Best-effort, never raises."""
+    base = os.path.join(CACHE_BASE, "cwd")
+    if not os.path.isdir(base):
+        return
+    now = time.time()
+    try:
+        hashes = os.listdir(base)
+    except OSError:
+        return
+    for h in hashes:
+        d = os.path.join(base, h)
+        for fname in ("active.json", "wrapper.lock"):
+            p = os.path.join(d, fname)
+            if not os.path.isfile(p):
+                continue
+            try:
+                if now - os.path.getmtime(p) <= max_age_secs:
+                    continue
+            except OSError:
+                continue
+            try: os.unlink(p)
+            except OSError: pass
 
 
 class OutputSpool:
@@ -461,6 +523,12 @@ Run
   termpilot htop                     any interactive program in a PTY
   termpilot -- bash --foo            use -- only when the child takes a flag
                                      that collides with a wrapper flag
+
+  --instance NAME  resilience-slot label within this cwd. Defaults to the
+                   controlling TTY's pts label (e.g. 'pts-3') so two
+                   terminals in one cwd get separate slots automatically.
+                   $TERMPILOT_INSTANCE wins over TTY; --instance wins
+                   over both. Charset [a-zA-Z0-9_.-], length 1-64.
 
 Configuration files (under ~/.config/termpilot/)
   relay-url        base URL of the relay deployment (set via --set-relay-url);
@@ -893,6 +961,11 @@ def parse_run_args(argv):
                    help="skip TLS cert verification (for local dev with php -S)")
     p.add_argument("--force", action="store_true",
                    help="run even if another wrapper appears to hold the per-cwd lock")
+    p.add_argument("--instance", default=None,
+                   help="resilience-slot label within this cwd. Default: derived "
+                        "from the controlling TTY (e.g. 'pts-3'); $TERMPILOT_INSTANCE "
+                        "wins over TTY; --instance wins over both. Charset "
+                        "[a-zA-Z0-9_.-], length 1-64.")
     p.add_argument("-h", "--help", action="store_true")
     args, rest = p.parse_known_args(argv)
     if rest and rest[0] == "--":
@@ -1206,19 +1279,26 @@ def cmd_run(argv):
     trigger_id_hex = crypto.trigger_id_for(token).hex()
 
     cwd = os.getcwd()
+    try:
+        instance = resolve_instance(args.instance)
+    except ValueError as e:
+        sys.stderr.write(f"termpilot: {e}\n")
+        return 2
 
-    # ---- Resilience: per-cwd lock, then decide sid + (maybe) --resume splice.
-    lock_fd = acquire_wrapper_lock(cwd)
+    # ---- Resilience: per-(cwd, instance) lock, then decide sid + (maybe) splice.
+    lock_fd = acquire_wrapper_lock(cwd, instance)
     if lock_fd is None and not args.force:
         sys.stderr.write(
-            f"termpilot: another wrapper appears to be running in {cwd}.\n"
-            "  Close it first, or pass --force to override.\n"
+            f"termpilot: another wrapper appears to be running in {cwd} "
+            f"(instance '{instance}').\n"
+            "  Close it first, pass --force to override, or pick a different "
+            "--instance NAME.\n"
         )
         return 4
     if lock_fd is None:
         sys.stderr.write("termpilot: --force given; proceeding without an exclusive lock\n")
 
-    active = read_active_json(cwd)
+    active = read_active_json(cwd, instance)
     now_ts = int(time.time())
     prev_sid = active.get("wrapper_sid") or None
     prev_marker_b64 = active.get("marker_b64") or None
@@ -1243,9 +1323,11 @@ def cmd_run(argv):
         prev_marker_b64 = None  # don't reuse a marker tied to a different sid
 
     cleanup_stale_sid_dirs(keep_sid=sid)
+    cleanup_legacy_cwd_artifacts()
 
     log_event("wrapper_start", sid=sid, prev_sid=prev_sid,
-              prev_age_s=prev_age, cwd_short=os.path.basename(cwd))
+              prev_age_s=prev_age, cwd_short=os.path.basename(cwd),
+              instance=instance)
 
     # Output spool: encryption queue with crash-resilient on-disk journal.
     out_spool = OutputSpool(sid, "out")
@@ -1294,7 +1376,7 @@ def cmd_run(argv):
     # Persist our wrapper_sid (and the marker we successfully registered
     # with) so a subsequent crash-restart can pick up the spool and
     # re-POST the same marker bytes.
-    write_active_json(cwd, wrapper_sid=sid, marker_b64=enc_marker_b64)
+    write_active_json(cwd, instance, wrapper_sid=sid, marker_b64=enc_marker_b64)
 
     pid, master = pty.fork()
     if pid == 0:
@@ -1601,7 +1683,7 @@ def cmd_run(argv):
         except Exception: pass
 
         try:
-            cur = read_active_json(cwd)
+            cur = read_active_json(cwd, instance)
             if leftover:
                 # Preserve recovery state: keep wrapper_sid + marker_b64 +
                 # update ts so the next start (within CRASH_RECOVERY_SECS)
@@ -1615,7 +1697,7 @@ def cmd_run(argv):
                 cur.pop("marker_b64", None)
                 cur.pop("pid", None)
                 cur["ts"] = int(time.time())
-            d = cwd_cache_dir(cwd)
+            d = cwd_cache_dir(cwd, instance)
             try: os.makedirs(d, mode=0o700, exist_ok=True)
             except OSError: pass
             try:
