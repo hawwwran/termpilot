@@ -35,9 +35,26 @@ header .connbadge.offline { background:#e5484d; }
 section.show-empty-hero #log,
 section.show-empty-hero .log-area,
 section.show-empty-hero #term-host,
+section.show-empty-hero #kbd-latched,
 section.show-empty-hero .ctrl,
 section.show-empty-hero #inputform,
 section.show-empty-hero .session-bar { display:none; }
+
+/* The on-screen keyboard, latched-modifier bar, and input form are
+   useful only while we're attached to a live session. Hide them when:
+   - no session is attached at all (.empty-state on the bar — covers
+     the "No session selected" header that appears between sessions
+     and on initial load when no session was auto-picked), and
+   - the attached session has gone offline/stale (.session-offline).
+   Sibling selectors work because all three controls live after
+   #session-bar in the DOM. Outranks the mobile media-query rule
+   that shows .ctrl when `main.show-ctrl` is set. */
+#session-bar.empty-state ~ #kbd-latched,
+#session-bar.empty-state ~ .ctrl,
+#session-bar.empty-state ~ #inputform,
+#session-bar.session-offline ~ #kbd-latched,
+#session-bar.session-offline ~ .ctrl,
+#session-bar.session-offline ~ #inputform { display:none; }
 /* Sidebar empty also gets an inline reload button. */
 .empty-mini { display:flex; flex-direction:column; align-items:flex-start; gap:8px; padding:16px; }
 .empty-mini button { padding:6px 12px; font-size:12px; border-radius:6px; background:#1d2230; border:1px solid #2c3a5a; color:#dbe5ff; cursor:pointer; }
