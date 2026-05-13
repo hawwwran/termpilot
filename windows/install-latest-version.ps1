@@ -32,6 +32,7 @@ function Write-Info([string]$msg) { Write-Host "  $msg" -ForegroundColor DarkGra
 Write-Host "╔══════════════════════════════════════════════╗" -ForegroundColor Cyan
 Write-Host "║   Install TermPilot for Windows (latest)     ║" -ForegroundColor Cyan
 Write-Host "╚══════════════════════════════════════════════╝" -ForegroundColor Cyan
+Write-Host "  script: $PSCommandPath" -ForegroundColor DarkGray
 Write-Host ""
 
 # --- Resolve latest tag ---------------------------------------------------
@@ -58,49 +59,51 @@ if (-not $assetUrl) {
 Write-Info "Asset URL: $assetUrl"
 Write-Host ""
 
-# --- Download to temp -----------------------------------------------------
-$tmp = New-Item -ItemType Directory -Path (Join-Path $env:TEMP ("termpilot-" + [guid]::NewGuid())) -Force
-$zipPath = Join-Path $tmp.FullName $Asset
-Write-Step "Downloading $Asset..."
+# --- Download + extract (combined) ----------------------------------------
+# Keep these in one try/catch so any failure dumps the full state — we've
+# seen $zipPath end up empty at the extract step in the wild without an
+# obvious cause upstream, and the resulting Expand-Archive / ZipFile error
+# is misleading on its own.
+$tmp = $null
+$zipPath = $null
 try {
+    $tmp = New-Item -ItemType Directory -Path (Join-Path $env:TEMP ("termpilot-" + [guid]::NewGuid())) -Force
+    $zipPath = Join-Path $tmp.FullName $Asset
+    Write-Info "Staging dir: $($tmp.FullName)"
+    Write-Info "Zip target:  $zipPath"
+
+    Write-Step "Downloading $Asset..."
     Invoke-WebRequest -Uri $assetUrl -OutFile $zipPath -UseBasicParsing
-} catch {
-    throw "Download failed: $($_.Exception.Message)"
-}
-Write-Ok "Got $((Get-Item $zipPath).Length) bytes"
-Write-Host ""
+    $zipSize = (Get-Item -LiteralPath $zipPath).Length
+    Write-Ok "Got $zipSize bytes"
+    Write-Host ""
 
-# --- Extract --------------------------------------------------------------
-# The zip is flat: termpilot-win-wrap.py, install.bat, lib/, shared/, … all
-# live at the zip's root. Extract directly to the install dir, wiping any
-# prior contents at the top level first (preserves the parent dir in case
-# the user dropped data alongside it).
-Write-Step "Extracting to $InstallRoot ..."
-if (-not (Test-Path -LiteralPath $InstallRoot)) {
-    New-Item -ItemType Directory -Path $InstallRoot -Force | Out-Null
-}
-# Best-effort wipe. SilentlyContinue tolerates locked files (rare —
-# typically only when something is still mid-tear-down); the per-entry
-# extract below overwrites whatever survives.
-Get-ChildItem -LiteralPath $InstallRoot -Force | ForEach-Object {
-    Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
-}
+    # The zip is flat: termpilot-win-wrap.py, install.bat, lib/, shared/,
+    # … all live at the zip's root. Extract directly to the install dir,
+    # wiping any prior contents at the top level first (preserves the
+    # parent dir in case the user dropped data alongside it).
+    Write-Step "Extracting to $InstallRoot ..."
+    if (-not (Test-Path -LiteralPath $InstallRoot)) {
+        New-Item -ItemType Directory -Path $InstallRoot -Force | Out-Null
+    }
+    # Best-effort wipe. SilentlyContinue tolerates locked files (rare —
+    # typically only when something is still mid-tear-down); the
+    # per-entry extract below overwrites whatever survives.
+    Get-ChildItem -LiteralPath $InstallRoot -Force | ForEach-Object {
+        Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+    }
 
-# Defensive: spell out the failure mode if $zipPath somehow got cleared
-# or the file disappeared (AV quarantine) — otherwise the .NET / cmdlet
-# error would be cryptic.
-if ([string]::IsNullOrEmpty($zipPath) -or -not (Test-Path -LiteralPath $zipPath)) {
-    throw "Downloaded zip missing at '$zipPath' before extraction. Antivirus interference?"
-}
+    if ([string]::IsNullOrEmpty($zipPath) -or -not (Test-Path -LiteralPath $zipPath)) {
+        throw "Zip vanished between download and extract: zipPath='$zipPath', tmp='$($tmp.FullName)'"
+    }
 
-# Use the .NET ZipFile API directly. PS 5.1's Expand-Archive has been
-# observed to surface "Cannot validate argument on parameter
-# 'LiteralPath'. The argument is null or empty." when the destination
-# was just wiped — a misleading wrapper-level error that hides the real
-# state. Per-entry ExtractToFile($entry, $path, $overwrite=$true) gives
-# us predictable overwrite semantics on .NET Framework 4.5+ (the 3-arg
-# ExtractToDirectory overload is .NET Core only).
-try {
+    # Use the .NET ZipFile API directly. PS 5.1's Expand-Archive has
+    # been observed to surface "Cannot validate argument on parameter
+    # 'LiteralPath'. The argument is null or empty." when the
+    # destination was just wiped — a misleading wrapper-level error
+    # that hides the real state. Per-entry ExtractToFile gives us
+    # predictable overwrite semantics on .NET Framework 4.5+ (the
+    # 3-arg ExtractToDirectory overload is .NET Core only).
     Add-Type -AssemblyName System.IO.Compression
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $archive = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
@@ -124,7 +127,17 @@ try {
         $archive.Dispose()
     }
 } catch {
-    throw "Extraction failed: $($_.Exception.Message)"
+    Write-Host ""
+    Write-Host "[install-latest-version] Failure during download or extract." -ForegroundColor Red
+    Write-Host "  message       : $($_.Exception.Message)" -ForegroundColor DarkRed
+    Write-Host "  zipPath       : '$zipPath'" -ForegroundColor DarkRed
+    Write-Host "  tmp.FullName  : '$(if ($tmp) { $tmp.FullName } else { '(null)' })'" -ForegroundColor DarkRed
+    Write-Host "  Asset         : '$Asset'" -ForegroundColor DarkRed
+    Write-Host "  InstallRoot   : '$InstallRoot'" -ForegroundColor DarkRed
+    Write-Host "  env:TEMP      : '$env:TEMP'" -ForegroundColor DarkRed
+    Write-Host "  env:LOCALAPPDATA: '$env:LOCALAPPDATA'" -ForegroundColor DarkRed
+    Write-Host "  script        : '$PSCommandPath'" -ForegroundColor DarkRed
+    throw
 }
 
 $wrapperPath = Join-Path $InstallRoot "termpilot-win-wrap.py"
