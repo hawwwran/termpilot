@@ -29,9 +29,9 @@ function Write-Step([string]$msg) { Write-Host $msg -ForegroundColor White }
 function Write-Ok([string]$msg)   { Write-Host "  $msg" -ForegroundColor Green }
 function Write-Info([string]$msg) { Write-Host "  $msg" -ForegroundColor DarkGray }
 
-Write-Host "╔══════════════════════════════════════════════╗" -ForegroundColor Cyan
-Write-Host "║   Install TermPilot for Windows (latest)     ║" -ForegroundColor Cyan
-Write-Host "╚══════════════════════════════════════════════╝" -ForegroundColor Cyan
+Write-Host "+==============================================+" -ForegroundColor Cyan
+Write-Host "|   Install TermPilot for Windows (latest)     |" -ForegroundColor Cyan
+Write-Host "+==============================================+" -ForegroundColor Cyan
 Write-Host "  script: $PSCommandPath" -ForegroundColor DarkGray
 Write-Host ""
 
@@ -60,7 +60,7 @@ Write-Info "Asset URL: $assetUrl"
 Write-Host ""
 
 # --- Download + extract (combined) ----------------------------------------
-# Keep these in one try/catch so any failure dumps the full state — we've
+# Keep these in one try/catch so any failure dumps the full state -- we've
 # seen $zipPath end up empty at the extract step in the wild without an
 # obvious cause upstream, and the resulting Expand-Archive / ZipFile error
 # is misleading on its own.
@@ -79,14 +79,14 @@ try {
     Write-Host ""
 
     # The zip is flat: termpilot-win-wrap.py, install.bat, lib/, shared/,
-    # … all live at the zip's root. Extract directly to the install dir,
+    # ... all live at the zip's root. Extract directly to the install dir,
     # wiping any prior contents at the top level first (preserves the
     # parent dir in case the user dropped data alongside it).
     Write-Step "Extracting to $InstallRoot ..."
     if (-not (Test-Path -LiteralPath $InstallRoot)) {
         New-Item -ItemType Directory -Path $InstallRoot -Force | Out-Null
     }
-    # Best-effort wipe. SilentlyContinue tolerates locked files (rare —
+    # Best-effort wipe. SilentlyContinue tolerates locked files (rare --
     # typically only when something is still mid-tear-down); the
     # per-entry extract below overwrites whatever survives.
     Get-ChildItem -LiteralPath $InstallRoot -Force | ForEach-Object {
@@ -100,7 +100,7 @@ try {
     # Use the .NET ZipFile API directly. PS 5.1's Expand-Archive has
     # been observed to surface "Cannot validate argument on parameter
     # 'LiteralPath'. The argument is null or empty." when the
-    # destination was just wiped — a misleading wrapper-level error
+    # destination was just wiped -- a misleading wrapper-level error
     # that hides the real state. Per-entry ExtractToFile gives us
     # predictable overwrite semantics on .NET Framework 4.5+ (the
     # 3-arg ExtractToDirectory overload is .NET Core only).
