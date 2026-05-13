@@ -34,10 +34,11 @@ import unittest
 from pathlib import Path
 from urllib.parse import urlencode
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "linux"))
 
-from lib import crypto  # noqa: E402
+from shared import crypto  # noqa: E402
 
 PHP_PORT = 6029
 RELAY_SECRET = "push-test-secret"
@@ -103,7 +104,7 @@ class MockPushServer:
 class PushRelayTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.docroot = ROOT / "php"
+        cls.docroot = ROOT / "relay"
         cls._orig_config = cls.docroot / "config.php"
         cls._backup_config = (
             cls._orig_config.with_suffix(".bak.push")
@@ -386,7 +387,7 @@ class PushEndpointStrictTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.docroot = ROOT / "php"
+        cls.docroot = ROOT / "relay"
         cls._orig_config = cls.docroot / "config.php"
         cls._backup_config = (
             cls._orig_config.with_suffix(".bak.push_strict")

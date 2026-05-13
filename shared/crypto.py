@@ -9,7 +9,7 @@ Wire format for an encrypted record (`Crypto.encrypt` output):
     base64-encoded for JSON transport.
 
 The same KDF parameters and the same wire format are mirrored in JS via
-WebCrypto in `php/lib/crypto.js`. Cross-language round-trip is
+WebCrypto in `relay/lib/crypto.js`. Cross-language round-trip is
 verified by `tests/test_crypto.py` (writes vectors) and
 `tests/test_crypto.html` (reads vectors).
 """

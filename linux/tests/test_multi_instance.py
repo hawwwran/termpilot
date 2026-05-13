@@ -24,13 +24,14 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "linux"))
 
 # Load termpilot-wrap as a module (no .py extension).
 from importlib.machinery import SourceFileLoader  # noqa: E402
 
-_loader = SourceFileLoader("ccwrap", str(ROOT / "termpilot-wrap"))
+_loader = SourceFileLoader("ccwrap", str(ROOT / "linux" / "termpilot-wrap"))
 _spec = importlib.util.spec_from_loader("ccwrap", _loader)
 ccwrap = importlib.util.module_from_spec(_spec)
 _loader.exec_module(ccwrap)

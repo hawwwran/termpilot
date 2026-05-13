@@ -1,8 +1,8 @@
 # TermPilot for Windows
 
 Standalone Windows port of the TermPilot wrapper. Speaks the exact same
-encrypted wire protocol as the Linux wrapper (`../termpilot-wrap`) — the
-relay (`../php/`) and browser PWA don't change.
+encrypted wire protocol as the Linux wrapper (`../linux/termpilot-wrap`) — the
+relay (`../relay/`) and browser PWA don't change.
 
 ## Requirements
 
@@ -13,17 +13,33 @@ relay (`../php/`) and browser PWA don't change.
 
 ## Quick install
 
-From an unzipped release, double-click — or run from cmd / PowerShell:
+**Fresh-install one-liner (no manual download needed)** — open PowerShell and run:
+
+```powershell
+iwr -useb https://raw.githubusercontent.com/hawwwran/termpilot/main/windows/install-latest-version.ps1 | iex
+```
+
+That downloads the latest `termpilot-windows.zip` from GitHub, extracts it
+to `%LOCALAPPDATA%\Programs\termpilot\`, and runs the bundled `install.bat`.
+
+**From an already-extracted zip** — double-click `install.bat`, or run it
+from cmd / PowerShell:
 
     install.bat
 
 This installs `tp` and `termpilot` into `%LOCALAPPDATA%\Programs\termpilot\bin\`
 and adds that directory to your USER PATH. It also `pip install --user`s
-the three runtime dependencies (`pywinpty`, `keyring`, `cryptography`).
+the runtime dependencies (`pywinpty`, `keyring`, `cryptography`, `qrcode`).
 
-For a fresh fetch of the latest release from GitHub:
+If Python 3.9+ isn't on PATH, `install.bat` offers to install Python 3.12
+via winget (user scope, no admin needed) or, as a fallback, downloads the
+official python.org installer and runs it silently. Both paths add Python
+to your user PATH so the installer continues without a console restart.
 
-    install-latest-version.bat
+**Re-fetch a newer release later** — `termpilot --update`, or re-run the
+one-liner above. If you've already extracted a release, the bundled
+`install-latest-version.bat` does the same thing without leaving the
+extracted dir.
 
 After install, open a new console window (PATH changes only apply to new
 sessions) and set yourself up:

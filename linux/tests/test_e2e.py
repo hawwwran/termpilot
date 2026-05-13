@@ -33,10 +33,11 @@ import time
 import unittest
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "linux"))
 
-from lib import crypto  # noqa: E402
+from shared import crypto  # noqa: E402
 
 
 PHP_PORT = 6019
@@ -91,7 +92,7 @@ class E2ETest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.work = Path(tempfile.mkdtemp(prefix="termpilot-e2e-"))
-        cls.docroot = ROOT / "php"
+        cls.docroot = ROOT / "relay"
         # Seed a clean config.php for the test session.
         cls._orig_config = cls.docroot / "config.php"
         cls._backup_config = cls._orig_config.with_suffix(".bak.e2e") if cls._orig_config.exists() else None

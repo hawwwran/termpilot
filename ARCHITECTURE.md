@@ -139,14 +139,14 @@ session detail bounce is instant.
 
 ### PWA / installable web app (landed 2026-05-10)
 
-- `php/manifest.webmanifest` — name, scope, `start_url=./index.html`,
+- `relay/manifest.webmanifest` — name, scope, `start_url=./index.html`,
   `display=standalone`, theme/background `#0d0f12`, plus a single
   Terminal app shortcut.
-- `php/sw.js` — minimal service worker: precaches the static shell on
+- `relay/sw.js` — minimal service worker: precaches the static shell on
   install (HTML, JS, icons, xterm CDN), cache-first with background
   refresh on the shell, and **never** intercepts `relay.php` (the seq
   protocol is real-time and would break under cached responses).
-- `php/icon-*.png` — app icons (192 and 512 px, regular and maskable
+- `relay/icon-*.png` — app icons (192 and 512 px, regular and maskable
   variants). The maskable variant has the foreground shrunk to ~75% of
   the canvas with the dark theme background extending to the edges, so
   Android's mask doesn't crop the artwork. Swap the source raster and
@@ -161,7 +161,7 @@ session detail bounce is instant.
 ### Update banner (improvements.md §4, landed 2026-05-10)
 
 - `tools/deploy.sh` sed-replaces a `__TERMPILOT_VERSION__` placeholder in
-  `php/sw.js` with a UTC build timestamp (`YYYYMMDDTHHMMSSZ`) before
+  `relay/sw.js` with a UTC build timestamp (`YYYYMMDDTHHMMSSZ`) before
   upload. The source tree keeps the literal placeholder, so dev servers
   and tests aren't affected.
 - The version is the suffix of `CACHE_NAME` (`termpilot-shell-<ts>`); on
@@ -314,10 +314,10 @@ trigger_id     = SHA-256(trigger_secret)                         # 32B, public
 - On `op_close` / `op_push_notify`, the caller presents
   `trigger_secret_hex` in the body. The relay re-hashes and
   `hash_equals`-compares against the stored verifier; mismatch → 401.
-- Both functions live in `lib/crypto.py` and `php/lib/crypto.js`
+- Both functions live in `shared/crypto.py` and `relay/lib/crypto.js`
   as `derive_trigger_secret` / `trigger_id_for` (Python) and
   `deriveTriggerSecret` / `triggerIdFor` (JS). Cross-language vectors
-  in `tests/crypto_vectors.json`.
+  in `linux/tests/crypto_vectors.json`.
 
 ### Protocol versioning ("v1" in AAD strings)
 
@@ -408,74 +408,112 @@ intended for tests.
 
 ```
 termpilot/
-├── README.md                  user-facing setup guide
+├── README.md                  umbrella overview (points to linux/, windows/, relay/)
 ├── ARCHITECTURE.md            this file
 ├── .gitignore
-├── install.sh                 creates the `termpilot` shell function (and `tp` alias)
+├── VERSION.json               dev value; CI rewrites per release
 │
-├── termpilot-wrap             main binary, multi-subcommand wrapper
+├── shared/                    cross-platform Python modules used by both wrappers
+│   ├── crypto.py              AES-256-GCM + PBKDF2 + AAD constructors
+│   └── release_channel.py     --version / --update + deferred update notice
 │
-├── lib/                       Python modules used by the wrapper
-│   ├── crypto.py              AES-256-GCM + PBKDF2 helpers
-│   └── keystore.py            keyring → file fallback for the device token
+├── linux/                     Linux/macOS wrapper, installers, tests, README
+│   ├── README.md              Linux/macOS quickstart (ships in the zip)
+│   ├── termpilot-wrap         the wrapper binary
+│   ├── install.sh             dev installer (registers `termpilot` shell function)
+│   ├── install-latest-version.sh   end-user bootstrap (downloads release zip)
+│   ├── lib/
+│   │   └── keystore.py        Linux/macOS keyring → file fallback
+│   └── tests/
+│       ├── run-all.sh         run every Python test (~100 s)
+│       ├── test_crypto.py     crypto primitives + cross-language vectors
+│       ├── test_keystore.py   keyring/file token storage
+│       ├── test_e2e.py        relay protocol + security
+│       ├── test_resilience.py spool, lock, active.json, alive flag, GC
+│       ├── test_push.py       VAPID gen, subscribe/unsubscribe, notify dispatch
+│       ├── test_wrapper_e2e.py wrapper round-trip with bash
+│       ├── test_multi_instance.py per-cwd resilience-slot resolution
+│       ├── test_config_gate.py RELAY_SECRET gate behaviour
+│       ├── test_crypto.html   cross-language vectors (manual: browser)
+│       └── crypto_vectors.json Python-generated vectors consumed by JS test
 │
-├── tests/
-│   ├── run-all.sh             run every Python test
-│   ├── test_crypto.py         crypto primitives + cross-language vectors
-│   ├── test_keystore.py       keyring/file token storage
-│   ├── test_e2e.py            relay protocol + security
-│   ├── test_resilience.py     spool, lock, active.json, alive flag, GC
-│   ├── test_push.py           VAPID gen, subscribe/unsubscribe, notify dispatch
-│   ├── test_wrapper_e2e.py    wrapper round-trip with bash
-│   ├── test_config_gate.py    RELAY_SECRET gate behaviour
-│   ├── test_crypto.html       cross-language vectors (manual: browser)
-│   └── crypto_vectors.json    Python-generated vectors consumed by JS test
+├── windows/                   Windows wrapper, installers, lib, README
+│   ├── README.md              Windows quickstart (ships in the zip)
+│   ├── termpilot-win-wrap.py  the wrapper (pywinpty-backed)
+│   ├── install.bat / install.ps1
+│   ├── install-latest-version.bat / .ps1
+│   ├── requirements.txt       pywinpty, keyring, cryptography, qrcode
+│   └── lib/
+│       ├── keystore_win.py    Credential Manager + ACL'd file fallback
+│       ├── pty_backend.py     pywinpty wrapper + console-mode helpers
+│       └── resilience_win.py  msvcrt locking + OutputSpool + log-mirror
 │
-├── php/                       what gets uploaded to the host
+├── relay/                     what gets uploaded to the PHP host
 │   ├── relay.php              encrypted byte/input/push relay
 │   ├── index.html             terminal view (login + manage tokens + decrypt)
-│   ├── manifest.webmanifest   PWA manifest (installable web app)
-│   ├── sw.js                  service worker — precaches the static shell
-│   ├── icon-{192,512}.png     app icons
-│   ├── icon-maskable-{192,512}.png  maskable variants (Android safe zone)
+│   ├── manifest.webmanifest   PWA manifest
+│   ├── sw.js                  service worker
+│   ├── icon-{192,512}.png     app icons (regular + maskable variants)
 │   ├── lib/
-│   │   ├── crypto.js          JS port of crypto.py (WebCrypto AES-GCM + PBKDF2)
+│   │   ├── crypto.js          JS port of shared/crypto.py (WebCrypto AES-GCM)
 │   │   ├── session.js         multi-token enumeration + per-session key cache
 │   │   ├── index.js           page-level UI logic
 │   │   ├── index.css          styles
-│   │   └── vendor/            xterm.js + jsQR (verbatim third-party)
+│   │   └── vendor/            xterm.js + jsQR (verbatim, pinned)
 │   ├── config.example.php     copy → config.php; optional RELAY_SECRET / ADMIN_SECRET
 │   └── .htaccess              deny data/, logs/, config.php; PWA MIME types
 │
-└── tools/
-    ├── lib-ftp-host.sh        shared: resolves FTP host (env / file / prompt)
-    ├── deploy.sh              upload php/ to the live relay over FTPS
-    └── fetch-logs.sh          pull relay logs via FTP
+├── tools/
+│   ├── lib-ftp-host.sh        shared: resolves FTP host (env / file / prompt)
+│   ├── deploy.sh              upload relay/ over FTPS
+│   ├── fetch-logs.sh          pull relay logs via FTP
+│   ├── vendor-fetch.sh        refresh pinned browser deps under relay/lib/vendor/
+│   ├── build-release.sh       build per-platform release zips locally
+│   └── sync-win-to-share.sh   mirror windows/ to a network share for testing
+│
+└── .github/workflows/release.yml CI: on v* tag, build + attach both zips
 ```
+
+The release workflow produces two flat zips:
+`termpilot-linux-macos.zip` and `termpilot-windows.zip`. Each contains
+the relevant platform tree's files plus a copy of `shared/`, flattened
+to the zip's top level so end-users extract straight into their install
+root with no nested `linux/` or `windows/` subdir.
 
 ## Setup (PC side)
 
-Supported platforms: Linux and macOS. The wrapper is pure-stdlib Python
-plus POSIX PTY/termios calls; everything else (paths, keyring backend,
-shell rc detection) branches at runtime, so the same checkout runs on
-both.
+Supported platforms: **Linux**, **macOS**, and **Windows**. Linux/macOS
+runs `linux/termpilot-wrap` (pure-stdlib Python plus POSIX PTY/termios
+calls). Windows runs `windows/termpilot-win-wrap.py`, which depends on
+`pywinpty`, `keyring`, `cryptography`, and `qrcode`. Both speak the
+same wire protocol through `shared/crypto.py`.
 
-### End-user install via the bootstrap
+### End-user install via the bootstrap (Linux/macOS)
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/hawwwran/termpilot/main/install-latest-version.sh | bash
+curl -fsSL https://raw.githubusercontent.com/hawwwran/termpilot/main/linux/install-latest-version.sh | bash
 ```
 
-`install-latest-version.sh` resolves the latest GitHub release tag,
-downloads `termpilot.zip`, extracts to `~/.local/share/termpilot/`,
-runs the bundled `install.sh`, then asks whether to mint a device
-token and whether to deploy the relay. Subsequent updates via
-`termpilot --update` re-extract over the same path and re-run
-`install.sh` so the shell function repoints cleanly.
+`linux/install-latest-version.sh` resolves the latest GitHub release tag,
+downloads `termpilot-linux-macos.zip`, extracts to
+`~/.local/share/termpilot/`, runs the bundled `install.sh`, then asks
+whether to mint a device token and whether to deploy the relay.
+Subsequent updates via `termpilot --update` re-extract over the same
+path and re-run `install.sh` so the shell function repoints cleanly.
+
+### End-user install (Windows)
+
+Download `termpilot-windows.zip` from the latest release, extract, and
+run `install.bat`. The installer offers to install Python 3.12 via
+winget (user scope, no admin) if Python isn't found, `pip install --user`s
+the runtime deps, creates `tp.cmd` + `termpilot.cmd` shims under
+`%LOCALAPPDATA%\Programs\termpilot\bin\`, and adds that dir to USER
+PATH. See `windows/README.md` for the full notes (Credential Manager
+storage, ConPTY caveats, log mirroring back to the install source).
 
 ### Develop / contribute
 
-1. `cd ~/git/termpilot && ./install.sh` — repoints the shell function
+1. `cd ~/git/termpilot/linux && ./install.sh` — repoints the shell function
    at the dev checkout. On Linux this patches `~/.bashrc`; on macOS
    `~/.zshrc` (and `~/.bash_profile` if you also use bash). It also
    defines a short `tp` alias when no other `tp` command exists.
@@ -497,9 +535,12 @@ To switch back to the installed prod copy after dev work:
   shipped zip carries its own.
 - `.github/workflows/release.yml` triggers on `v*` tags. It verifies
   the tag is on `main`, stamps `VERSION.json`, generates a
-  `VERSION.md` changelog from `git log <prev>..<this>`, zips the tree
-  (excluding `.git`, `.github`, `server-logs`, caches, runtime
-  config/data), and attaches `termpilot.zip` to the GitHub Release.
+  `VERSION.md` changelog from `git log <prev>..<this>`, then runs
+  `tools/build-release.sh linux` and `tools/build-release.sh windows`
+  to produce two flat zips (`termpilot-linux-macos.zip` and
+  `termpilot-windows.zip`, each containing the relevant platform tree
+  plus `shared/`, `VERSION.json`, and a platform README), and attaches
+  both to the GitHub Release.
 - The local launcher
   `~/SynologyDrive/Development/linux/hwntools-custom-packages/releases/release-termpilot.sh`
   is the convenience wrapper that picks the next version (patch bump
@@ -511,7 +552,7 @@ To switch back to the installed prod copy after dev work:
 
 Each `termpilot run` invocation does two cheap things to surface a
 new release without ever stalling or interleaving with the wrapped
-child's output. Both live in `lib/release_channel.py`.
+child's output. Both live in `shared/release_channel.py`.
 
 **Phase 1 (sync, 3-second budget).** Before any relay or PTY work,
 the wrapper checks for a parked notice at
@@ -561,14 +602,14 @@ which is a no-op in dev anyway.
 
 ## Testing
 
-`tests/run-all.sh` runs all Python tests (~100 s, dominated by
+`linux/tests/run-all.sh` runs all Python tests (~100 s, dominated by
 `test_wrapper_e2e.py` which spawns a real bash through the wrapper).
 
 For browser-side cross-language vectors:
 ```sh
-python3 tests/test_crypto.py --gen-vectors
+python3 linux/tests/test_crypto.py --gen-vectors
 python3 -m http.server 7755 --bind 127.0.0.1 &
-xdg-open http://127.0.0.1:7755/tests/test_crypto.html
+xdg-open http://127.0.0.1:7755/linux/tests/test_crypto.html
 ```
 
 ## Operational notes (future-me)

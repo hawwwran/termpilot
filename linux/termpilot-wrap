@@ -59,11 +59,20 @@ import urllib.request
 
 import socket  # noqa: F401  (urllib uses it; kept for clarity)
 
-# Make `lib/` importable regardless of cwd.
+# Resolve sibling `lib/` and `shared/`. The release zip is flat (both
+# next to this wrapper); the dev tree has `shared/` one level up at the
+# repo root. Probe both so the same code runs in either layout.
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
+for _shared_parent in (SCRIPT_DIR, os.path.join(SCRIPT_DIR, "..")):
+    if os.path.isdir(os.path.join(_shared_parent, "shared")):
+        _shared_parent = os.path.realpath(_shared_parent)
+        if _shared_parent not in sys.path:
+            sys.path.insert(0, _shared_parent)
+        break
 
-from lib import crypto, keystore  # noqa: E402
+from shared import crypto  # noqa: E402
+from lib import keystore   # noqa: E402
 
 
 # ============================================================================
@@ -1214,7 +1223,7 @@ def cmd_run(argv):
     # invocation. Both no-op in dev checkouts and never raise — the
     # update channel must not block or break a session start.
     try:
-        from lib import release_channel
+        from shared import release_channel
         release_channel.handle_pending_update_notice(SCRIPT_DIR)
         release_channel.spawn_async_update_check(SCRIPT_DIR)
     except Exception:
@@ -1751,10 +1760,10 @@ def main(argv=None):
     if argv and argv[0] in ("clear-relay-secret", "--clear-relay-secret"):
         return cmd_clear_relay_secret(argv[1:])
     if argv and argv[0] in ("version", "--version", "-V"):
-        from lib import release_channel
+        from shared import release_channel
         return release_channel.cmd_version(argv[1:], SCRIPT_DIR)
     if argv and argv[0] in ("update", "--update"):
-        from lib import release_channel
+        from shared import release_channel
         return release_channel.cmd_update(argv[1:], SCRIPT_DIR)
     if argv and argv[0] == "run":
         return cmd_run(argv[1:])

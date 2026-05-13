@@ -10,7 +10,7 @@
 #   1) From inside an already-extracted zip:
 #        ./install-latest-version.sh
 #   2) Piped straight from a fresh checkout via curl:
-#        curl -fsSL https://raw.githubusercontent.com/hawwwran/termpilot/main/install-latest-version.sh | bash
+#        curl -fsSL https://raw.githubusercontent.com/hawwwran/termpilot/main/linux/install-latest-version.sh | bash
 #
 # All interactive prompts read from /dev/tty, so the curl-piped form
 # still works.
@@ -19,7 +19,8 @@ set -u
 
 REPO="hawwwran/termpilot"
 INSTALL_ROOT="$HOME/.local/share/termpilot"
-ZIP_URL_LATEST="https://github.com/${REPO}/releases/latest/download/termpilot.zip"
+ASSET="termpilot-linux-macos.zip"
+ZIP_URL_LATEST="https://github.com/${REPO}/releases/latest/download/${ASSET}"
 API_LATEST="https://api.github.com/repos/${REPO}/releases/latest"
 
 RED='\033[0;31m'
@@ -90,9 +91,9 @@ echo ""
 # ---- Download zip ---------------------------------------------------------
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
-ZIP_PATH="$TMPDIR/termpilot.zip"
+ZIP_PATH="$TMPDIR/$ASSET"
 
-step "Downloading termpilot.zip..."
+step "Downloading ${ASSET}..."
 if ! curl -fSL --progress-bar "$ZIP_URL_LATEST" -o "$ZIP_PATH"; then
     fail "Download failed."
     exit 1
@@ -169,12 +170,14 @@ fi
 echo ""
 
 # ---- Optional deploy ------------------------------------------------------
-if prompt "Deploy the relay server (uploads php/ over FTPS)?" n; then
+# The deploy helper only ships in dev trees (not the end-user zip), so
+# the prompt only appears when tools/deploy.sh is reachable from the
+# install root.
+if [[ -x "$INSTALL_ROOT/tools/deploy.sh" ]] \
+   && prompt "Deploy the relay server (uploads relay/ over FTPS)?" n; then
     echo ""
     step "Running tools/deploy.sh..."
     hr
-    # The deploy script itself prompts for FTP host + credentials if
-    # missing — we don't need to gather them here.
     ( cd "$INSTALL_ROOT" && ./tools/deploy.sh ) || {
         fail "Deploy failed. You can re-run later with:"
         info "  cd $INSTALL_ROOT && ./tools/deploy.sh"

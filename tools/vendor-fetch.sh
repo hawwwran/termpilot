@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# Re-fetch the vendored browser deps in php/lib/vendor/.
+# Re-fetch the vendored browser deps in relay/lib/vendor/.
 #
 # Run from a clean tree, then `git diff` to inspect the new bytes
-# before committing. Checksums are pinned in php/lib/vendor/NOTICE —
+# before committing. Checksums are pinned in relay/lib/vendor/NOTICE —
 # update both this script and the NOTICE in lockstep when bumping a
 # version.
 
 set -euo pipefail
 
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")"/.. && pwd)"
-VENDOR=php/lib/vendor
+VENDOR=relay/lib/vendor
 mkdir -p "$VENDOR"
 
 # version → (url, dest, expected sha256)
@@ -36,7 +36,7 @@ done
 if [[ $ok -ne 1 ]]; then
   echo
   echo "One or more checksums failed. If you intended to update a pinned" >&2
-  echo "version, update both this script and php/lib/vendor/NOTICE." >&2
+  echo "version, update both this script and relay/lib/vendor/NOTICE." >&2
   exit 1
 fi
 

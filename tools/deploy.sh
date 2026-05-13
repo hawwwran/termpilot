@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Deploys php/ to the live relay over FTPS using ~/.netrc.
+# Deploys relay/ to the live relay over FTPS using ~/.netrc.
 # Backs up live files first into ./server-logs/backup-<ts>/.
 # NEVER touches: config.php, data/, logs/.
 #
@@ -14,7 +14,7 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib-ftp-host.sh"
 resolve_ftp_host
 resolve_ftp_credentials
-SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")"/.. && pwd)/php"
+SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")"/.. && pwd)/relay"
 BACKUP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")"/.. && pwd)/server-logs/backup-$(date +%Y%m%dT%H%M%S)"
 
 # TLS is required (--ssl-reqd). Many shared hosts present a cert chain
@@ -92,7 +92,7 @@ upload "$SRC_DIR/lib/session.js"            "lib/session.js"
 upload "$SRC_DIR/lib/keyboard.js"           "lib/keyboard.js"
 upload "$SRC_DIR/lib/index.css"             "lib/index.css"
 upload "$SRC_DIR/lib/index.js"              "lib/index.js"
-# Vendored third-party assets (see php/lib/vendor/NOTICE).
+# Vendored third-party assets (see relay/lib/vendor/NOTICE).
 upload "$SRC_DIR/lib/vendor/xterm.min.css"  "lib/vendor/xterm.min.css"
 upload "$SRC_DIR/lib/vendor/xterm.min.js"   "lib/vendor/xterm.min.js"
 upload "$SRC_DIR/lib/vendor/jsQR.js"        "lib/vendor/jsQR.js"

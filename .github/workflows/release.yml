@@ -61,29 +61,20 @@ jobs:
           } > VERSION.md
           cat VERSION.md
 
-      - name: Pack termpilot.zip
-        run: |
-          # Exclude internal dev artefacts and per-host runtime state.
-          # config.php / data / logs are user-specific runtime state and
-          # must never ship. server-logs holds deploy backups and is
-          # huge. The .github tree itself isn't useful to end users.
-          zip -r termpilot.zip . \
-            -x '.git/*' \
-            -x '.github/*' \
-            -x 'server-logs/*' \
-            -x '__pycache__/*' \
-            -x '*/__pycache__/*' \
-            -x '*.pyc' \
-            -x 'php/config.php' \
-            -x 'php/data/*' \
-            -x 'php/logs/*' \
-            -x '.claude/*' \
-            -x '.playwright-mcp/*'
-          ls -l termpilot.zip
+      - name: Build Linux/macOS zip
+        # tools/build-release.sh stages a flat tree per platform
+        # (wrapper + installers + shared/ + VERSION.json + README.md)
+        # and zips it. End users see no linux/ or windows/ subdir.
+        run: bash tools/build-release.sh linux
+
+      - name: Build Windows zip
+        run: bash tools/build-release.sh windows
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: termpilot.zip
+          files: |
+            dist/termpilot-linux-macos.zip
+            dist/termpilot-windows.zip
           generate_release_notes: true
           body_path: VERSION.md

@@ -49,8 +49,17 @@ from pathlib import Path
 
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
+# `shared/` ships flat alongside the wrapper in the release zip, or one
+# level up in the dev tree. Probe both layouts.
+for _shared_parent in (SCRIPT_DIR, os.path.join(SCRIPT_DIR, "..")):
+    if os.path.isdir(os.path.join(_shared_parent, "shared")):
+        _shared_parent = os.path.realpath(_shared_parent)
+        if _shared_parent not in sys.path:
+            sys.path.insert(0, _shared_parent)
+        break
 
-from lib import crypto, keystore_win as keystore, pty_backend, resilience_win as resil  # noqa: E402
+from shared import crypto  # noqa: E402
+from lib import keystore_win as keystore, pty_backend, resilience_win as resil  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -662,7 +671,7 @@ def cmd_run(argv):
     args, cmd = parse_run_args(argv)
     pending_update = None
     try:
-        from lib import release_channel
+        from shared import release_channel
         pending_update = release_channel.peek_pending_update_notice(SCRIPT_DIR)
         release_channel.spawn_async_update_check(SCRIPT_DIR)
     except Exception:
@@ -801,7 +810,7 @@ def cmd_run(argv):
     update_lines = []
     if pending_update is not None:
         try:
-            from lib import release_channel
+            from shared import release_channel
             update_lines = release_channel.format_update_notice_lines(*pending_update)
         except Exception:
             update_lines = []
@@ -812,7 +821,7 @@ def cmd_run(argv):
     if not banner_injected:
         if pending_update is not None:
             try:
-                from lib import release_channel
+                from shared import release_channel
                 sys.stderr.write(
                     "\n".join(release_channel.format_update_notice_lines(*pending_update))
                     + "\n"
@@ -1204,10 +1213,10 @@ def main(argv=None):
     if argv and argv[0] in ("clear-relay-secret", "--clear-relay-secret"):
         return cmd_clear_relay_secret(argv[1:])
     if argv and argv[0] in ("version", "--version", "-V"):
-        from lib import release_channel
+        from shared import release_channel
         return release_channel.cmd_version(argv[1:], SCRIPT_DIR)
     if argv and argv[0] in ("update", "--update"):
-        from lib import release_channel
+        from shared import release_channel
         return release_channel.cmd_update(argv[1:], SCRIPT_DIR)
     if argv and argv[0] == "run":
         return cmd_run(argv[1:])

@@ -27,8 +27,9 @@ import time
 import unittest
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "linux"))
 
 
 PHP_PORT = 6020  # distinct from test_e2e.py
@@ -47,11 +48,11 @@ def wait_port(host: str, port: int, timeout: float = 5.0) -> bool:
 
 class RelayConfigGateTest(unittest.TestCase):
     def _spawn_with_config(self, config_body):
-        # Build a self-contained docroot copying the real php/ tree so the
-        # relay sees its actual sources, but with our chosen config.php.
+        # Build a self-contained docroot copying the real relay/ tree so
+        # the relay sees its actual sources, but with our chosen config.php.
         work = Path(tempfile.mkdtemp(prefix="termpilot-cfg-"))
-        docroot = work / "php"
-        shutil.copytree(ROOT / "php", docroot)
+        docroot = work / "relay"
+        shutil.copytree(ROOT / "relay", docroot)
         cfg = docroot / "config.php"
         if config_body is None:
             if cfg.exists(): cfg.unlink()

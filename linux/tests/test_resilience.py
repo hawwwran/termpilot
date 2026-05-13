@@ -32,10 +32,11 @@ import time
 import unittest
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "linux"))
 
-from lib import crypto  # noqa: E402
+from shared import crypto  # noqa: E402
 
 # Load termpilot-wrap (no .py extension) as a module so we can poke at the
 # resilience helpers directly. Importing under a non-__main__ name avoids
@@ -43,7 +44,7 @@ from lib import crypto  # noqa: E402
 # extensions, so hand it an explicit SourceFileLoader.
 from importlib.machinery import SourceFileLoader  # noqa: E402
 
-_loader = SourceFileLoader("ccwrap", str(ROOT / "termpilot-wrap"))
+_loader = SourceFileLoader("ccwrap", str(ROOT / "linux" / "termpilot-wrap"))
 _spec = importlib.util.spec_from_loader("ccwrap", _loader)
 ccwrap = importlib.util.module_from_spec(_spec)
 _loader.exec_module(ccwrap)
@@ -223,7 +224,7 @@ class ActiveJsonTests(unittest.TestCase):
 class RelayResilienceTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.docroot = ROOT / "php"
+        cls.docroot = ROOT / "relay"
         cls._orig_config = cls.docroot / "config.php"
         cls._backup_config = cls._orig_config.with_suffix(".bak.resilience") \
             if cls._orig_config.exists() else None

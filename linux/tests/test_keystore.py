@@ -17,10 +17,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "linux"))
 
-from lib import keystore, crypto  # noqa: E402
+from lib import keystore
+from shared import crypto  # noqa: E402
 
 
 class TokenStorageTests(unittest.TestCase):

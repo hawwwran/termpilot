@@ -24,10 +24,11 @@ import unittest
 from pathlib import Path
 
 # Make `lib/` importable when run as a script.
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "linux"))
 
-from lib.crypto import (  # noqa: E402
+from shared.crypto import (  # noqa: E402
     Crypto,
     SALT,
     PBKDF2_ITERATIONS,
@@ -203,7 +204,7 @@ class TriggerSecretTests(unittest.TestCase):
 
     def test_trigger_info_constant_locked(self):
         # Changing this constant breaks cross-language interop. If you
-        # change it, also update php/lib/crypto.js:TRIGGER_INFO and
+        # change it, also update relay/lib/crypto.js:TRIGGER_INFO and
         # regenerate vectors.
         self.assertEqual(TRIGGER_INFO, b"termpilot:trigger:v1")
 

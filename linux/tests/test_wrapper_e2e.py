@@ -23,10 +23,11 @@ import time
 import unittest
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "linux"))
 
-from lib import crypto  # noqa: E402
+from shared import crypto  # noqa: E402
 
 PHP_PORT = 6020
 RELAY_BASE = f"http://127.0.0.1:{PHP_PORT}"
@@ -100,7 +101,7 @@ class HTTPClient:
 class WrapperE2E(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.docroot = ROOT / "php"
+        cls.docroot = ROOT / "relay"
         cls._orig = cls.docroot / "config.php"
         cls._bak = cls._orig.with_suffix(".bak.wraptest") if cls._orig.exists() else None
         if cls._bak: shutil.move(str(cls._orig), str(cls._bak))
@@ -152,7 +153,7 @@ class WrapperE2E(unittest.TestCase):
         # Run wrapper without local stdin (--no-local) so we drive purely via the relay.
         # Use `bash -i` as the spawned child.
         proc = subprocess.Popen(
-            [str(ROOT / "termpilot-wrap"), "run", "--no-local", "--insecure",
+            [str(ROOT / "linux" / "termpilot-wrap"), "run", "--no-local", "--insecure",
              "--", "bash", "-i"],
             env=env,
             stdin=subprocess.DEVNULL,

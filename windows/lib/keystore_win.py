@@ -28,7 +28,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from . import crypto
+from shared import crypto
 
 KEYRING_SERVICE = "termpilot"
 KEYRING_USERNAME = "default"
