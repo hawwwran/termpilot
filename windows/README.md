@@ -84,6 +84,11 @@ The wrapper writes structured JSONL events to:
 Set `TERMPILOT_DEBUG=1` to also stream events to stderr in the running
 console.
 
+If a session feels laggy, run `termpilot --test-connection` from a fresh
+console — it probes the relay's `debug.php` endpoint and reports
+wall-clock RTT versus PHP-side time so you can tell whether the issue is
+network, relay-side filesystem, or FastCGI worker queueing on the host.
+
 ## Multiple windows in the same project
 
 Each running wrapper holds a per-(cwd, instance) lock. The instance

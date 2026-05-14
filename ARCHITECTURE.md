@@ -387,6 +387,10 @@ termpilot --show-token                 sudo-gated; reveal stored token
 termpilot --version                    print installed version + check for newer release
 termpilot --update                     check for newer release; install if user accepts
                                        (skips the install prompt in dev checkouts)
+termpilot --test-connection            probe the relay's debug.php endpoint; report
+                                       wall-clock RTT vs PHP-side time so the user can
+                                       tell whether perceived slowness is transport,
+                                       FastCGI queueing, or relay-side filesystem
 termpilot                              spawn $SHELL in a PTY
 termpilot bash                         spawn bash explicitly
 termpilot tmux new -A -s main          persistent tmux session
@@ -408,6 +412,40 @@ work even before the relay URL is set.
 `TERMPILOT_TOKEN_HEX` env var bypasses keyring/file lookup and is only
 intended for tests.
 
+## Diagnostics
+
+Three coordinated surfaces measure relay round-trip and surface the
+result so the user can distinguish "slow network" from "slow relay" from
+"queued at FastCGI gateway".
+
+- **`relay/debug.php`** — auth-gated (same `RELAY_SECRET` as `relay.php`).
+  Exposes `?op=ping` (no-op, measures pure transport + PHP startup),
+  `?op=fs` (mkdir + 4 KB write + read + 10× append + cleanup; surfaces
+  shared-host filesystem behaviour), and `?op=info` (SAPI, PHP version,
+  opcache, disk free, load avg). Every response carries `server_ms` and
+  a per-op `timings_ms` map plus a `Server-Timing` header so DevTools
+  picks it up natively.
+- **`termpilot --test-connection`** — wrapper-side runner. Reuses one
+  `http.client` connection across 10 pings + 3 fs probes so the report
+  shows steady-state RTT (what real traffic experiences under
+  keep-alive), not handshake-on-every-probe overhead. The verdict at
+  the bottom names the dominant cost — transport, relay, or "RELAY
+  QUEUEING" (high p95 wall with flat server time = FastCGI workers all
+  busy in long-polls, contending requests queue at the gateway).
+- **Browser disc + modal** (`relay/lib/index.js`) — small coloured disc
+  in the session-bar (green/yellow/orange, with a pulse on orange).
+  Click opens a stats modal showing samples, p50/p95/max latency over
+  small-payload samples, backlog state, and a Run-full-test button that
+  invokes the same diagnostic from the browser. An (i) button flips the
+  modal to a help view explaining each metric.
+
+The disc is fed by per-poll samples gathered in `pollLoop` and per-POST
+samples from `_postInputOnce`. Big-batch samples (response > 8 KB) are
+excluded from duration triggers — that's bandwidth-bound, not
+latency-bound — but still count for backlog detection. The same
+`runConnectionDiagnostic()` powers the modal's Run button and the
+settings dialog's Test button.
+
 ## File layout
 
 ```
@@ -419,7 +457,9 @@ termpilot/
 │
 ├── shared/                    cross-platform Python modules used by both wrappers
 │   ├── crypto.py              AES-256-GCM + PBKDF2 + AAD constructors
-│   └── release_channel.py     --version / --update + deferred update notice
+│   ├── release_channel.py     --version / --update + deferred update notice
+│   └── connection_test.py     --test-connection runner: probe debug.php, report
+│                              wall vs server time with queueing-aware verdict
 │
 ├── linux/                     Linux/macOS wrapper, installers, tests, README
 │   ├── README.md              Linux/macOS quickstart (ships in the zip)
@@ -454,6 +494,7 @@ termpilot/
 │
 ├── relay/                     what gets uploaded to the PHP host
 │   ├── relay.php              encrypted byte/input/push relay
+│   ├── debug.php              connection-diagnostic endpoint (?op=ping|fs|info)
 │   ├── index.html             terminal view (login + manage tokens + decrypt)
 │   ├── manifest.webmanifest   PWA manifest
 │   ├── sw.js                  service worker

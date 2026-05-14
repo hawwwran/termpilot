@@ -297,7 +297,7 @@ def cleanup_stale_sid_dirs(keep_sid: str, max_age_secs: int = 7 * 24 * 3600) -> 
     # Defense-in-depth: if a junction / symlink ever appeared under sid/,
     # rmtree would otherwise traverse it. Realpath-canonicalise and skip
     # anything whose target escapes the cache base. Mirrors the relay's
-    # op_gc sanity check.
+    # auto_gc_pass() sanity check.
     try:
         real_base = os.path.realpath(base)
     except OSError:

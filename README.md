@@ -51,8 +51,10 @@ and double-click `install.bat`. See [`windows/README.md`](windows/README.md)
 for the full notes (Credential Manager, ConPTY caveats, log mirroring).
 
 **Relay** — upload the contents of [`relay/`](relay/) to a PHP-capable
-host. The Linux/macOS quickstart covers `RELAY_SECRET`, `.htaccess`,
-and the cron `?op=gc` cleanup.
+host. The Linux/macOS quickstart covers `RELAY_SECRET` and `.htaccess`.
+Session data is cleaned up automatically: every `op_close` triggers an
+auto-GC pass (5-min cutoff for cleanly-closed sessions, 1-hour cutoff
+for silently-dead ones — both tunable in `config.php`).
 
 ## Architecture, threat model, ops notes
 

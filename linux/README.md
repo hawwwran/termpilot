@@ -59,15 +59,12 @@ For architecture, threat model, and operational notes see
    `RELAY_SECRET` to a random 32-byte hex string
    (`openssl rand -hex 32`). Skip to run unauthenticated — content
    stays encrypted regardless; this is only a spam gate.
-3. (Optional) Set `ADMIN_SECRET` in `config.php` if you want to enable
-   the `?op=gc` cleanup endpoint. Trigger from a daily cron:
-   ```sh
-   curl -X POST -H "Authorization: Bearer $ADMIN_SECRET" \
-        -H "Content-Type: application/json" -d '{}' \
-        https://your.host/term/relay.php?op=gc
-   ```
-4. Make sure PHP can write to that directory (it creates `data/` and
+3. Make sure PHP can write to that directory (it creates `data/` and
    `logs/` on first request — and `data/vapid.json` on first push use).
+4. Session data is wiped automatically: every `op_close` triggers a
+   cleanup pass (5-min cutoff for cleanly-closed sessions, 1-hour for
+   silently-dead ones). Tune via `AUTO_GC_CLOSED_SECS` / `AUTO_GC_STALE_SECS`
+   in `config.php` if needed.
 5. (Apache works as-is. On nginx, replicate the `.htaccess` rules:
    `location ~ ^/term/(data|logs)/ { return 403; }` and similar for
    `config.php`. Also add `application/manifest+json` to your MIME
@@ -169,6 +166,7 @@ tp claude                          # any command works — no -- needed
 termpilot --show-token             # sudo-gated; reveal the stored token
 termpilot --get-relay-url          # print the currently configured relay URL
 termpilot --force                  # bypass the per-cwd single-instance lock
+termpilot --test-connection        # probe relay latency: wall RTT vs PHP-side time
 ```
 
 (Use `termpilot -- <cmd>` explicitly only when the child command takes a
