@@ -93,8 +93,13 @@ $MAX_LIMIT       = 500;
 $MAX_BLOB_BYTES  = 1_048_576; // 1 MB cap per encrypted record
 $ALIVE_TTL_SECS  = defined('ALIVE_TTL_SECS') ? (int)ALIVE_TTL_SECS : 300;
 // GC defaults; the gc op also accepts overrides in the request body.
-$GC_CLOSED_AGE_SECS = defined('GC_CLOSED_AGE_SECS') ? (int)GC_CLOSED_AGE_SECS : 7 * 24 * 3600;
-$GC_STALE_AGE_SECS  = defined('GC_STALE_AGE_SECS')  ? (int)GC_STALE_AGE_SECS  : 30 * 24 * 3600;
+// auto_gc_pass() — best-effort cleanup triggered by every op_close.
+// Two thresholds: explicit close gets short retention (no client will
+// ever want that sid again — crash recovery is wrapper-side and only
+// applies to dirty exits); silent death gets a longer grace so a brief
+// network partition on the wrapper's PC doesn't kill the session.
+$AUTO_GC_CLOSED_SECS = defined('AUTO_GC_CLOSED_SECS') ? (int)AUTO_GC_CLOSED_SECS :     5 * 60;
+$AUTO_GC_STALE_SECS  = defined('AUTO_GC_STALE_SECS')  ? (int)AUTO_GC_STALE_SECS  :     60 * 60;
 
 // ---- Auth -----------------------------------------------------------------
 
@@ -105,11 +110,7 @@ $method = $_SERVER['REQUEST_METHOD'];
 // whether to render the bearer-secret input field.
 if ($op === 'auth_required') { json_ok(['required' => auth_required()]); }
 
-// op=gc skips the RELAY_SECRET gate because it has its own ADMIN_SECRET
-// auth (a separate, higher-privilege secret). Both are sent via Bearer
-// and only one header fits, so the admin path bypasses the RELAY_SECRET
-// check rather than overload the same secret with two roles.
-if ($op !== 'gc' && !check_auth()) { json_err(401, 'unauthorized'); }
+if (!check_auth()) { json_err(401, 'unauthorized'); }
 
 try {
     switch ($op) {
@@ -125,7 +126,6 @@ try {
         case 'close':     require_method('POST'); op_close($DATA_DIR); break;
         case 'sessions':  require_method('GET');  op_sessions($DATA_DIR, $ALIVE_TTL_SECS); break;
         case 'meta':      require_method('GET');  op_meta($DATA_DIR); break;
-        case 'gc':        require_method('POST'); op_gc($DATA_DIR, $GC_CLOSED_AGE_SECS, $GC_STALE_AGE_SECS); break;
         case 'push_pubkey':      require_method('GET');  op_push_pubkey($DATA_DIR); break;
         case 'push_subscribe':   require_method('POST'); op_push_subscribe($DATA_DIR); break;
         case 'push_unsubscribe': require_method('POST'); op_push_unsubscribe($DATA_DIR); break;
@@ -430,6 +430,7 @@ function op_heartbeat(string $dataDir): void {
 }
 
 function op_close(string $dataDir): void {
+    global $AUTO_GC_CLOSED_SECS, $AUTO_GC_STALE_SECS;
     $body = json_in();
     $sid = require_sid($body);
     $dir = session_dir_or_404($dataDir, $sid);
@@ -452,7 +453,67 @@ function op_close(string $dataDir): void {
     $meta['closed'] = true;
     $meta['closed_at'] = time();
     write_public_meta($dir, $meta);
-    json_ok(['ok' => true]);
+
+    // Inline the response (no json_ok — it exit()s, which would skip the
+    // post-response cleanup below). fastcgi_finish_request flushes the
+    // response to the client and lets the worker keep running to do the
+    // cleanup pass without blocking the client.
+    @header('Content-Type: application/json');
+    echo json_encode(['ok' => true]);
+    if (function_exists('fastcgi_finish_request')) {
+        @fastcgi_finish_request();
+    }
+    try {
+        auto_gc_pass($dataDir, $AUTO_GC_CLOSED_SECS, $AUTO_GC_STALE_SECS);
+    } catch (Throwable $e) {
+        @error_log('termpilot auto_gc: ' . $e->getMessage());
+    }
+}
+
+function auto_gc_pass(string $dataDir, int $closedSecs, int $staleSecs, int $maxRemovals = 50): int {
+    // Best-effort cleanup of stale sessions, run from every op_close.
+    // Two thresholds:
+    //   closed-stale  — explicit close (closed_at set), short window.
+    //                   No client will reattach: crash recovery is
+    //                   wrapper-side and only triggers on dirty exits.
+    //   last-seen-stale — wrapper never closed cleanly (crashed, killed,
+    //                   network partition). Longer window so a normal
+    //                   blip doesn't kill an otherwise-fine session.
+    // Hard cap on removals per call so a relay with a big backlog
+    // doesn't make one close slow on the first activation.
+    $now = time();
+    $removed = 0;
+    $realData = @realpath($dataDir);
+    foreach (@glob($dataDir . '/*', GLOB_ONLYDIR) ?: [] as $dir) {
+        if ($removed >= $maxRemovals) break;
+        $name = basename($dir);
+        // Hex-shaped basenames only: skips data/push/, data/.cache/, etc.
+        if (!preg_match('/^[a-f0-9]{6,64}$/', $name)) continue;
+        $real = @realpath($dir);
+        if ($realData === false || $real === false
+            || strncmp($real, $realData . DIRECTORY_SEPARATOR, strlen($realData) + 1) !== 0) {
+            continue;
+        }
+        $meta = read_public_meta($dir);
+        $reason = null;
+        if (!$meta) {
+            // No meta: orphan from a partial register. Be conservative
+            // (might be mid-write) — only sweep when comfortably old.
+            $age = $now - (int)@filemtime($dir);
+            if ($age > 3600) $reason = 'orphan';
+        } elseif (!empty($meta['closed']) && (int)($meta['closed_at'] ?? 0) > 0
+                  && $now - (int)$meta['closed_at'] > $closedSecs) {
+            $reason = 'closed-stale';
+        } elseif ((int)($meta['last_seen'] ?? 0) > 0
+                  && $now - (int)$meta['last_seen'] > $staleSecs) {
+            $reason = 'last-seen-stale';
+        }
+        if ($reason !== null) {
+            rrmdir($dir);
+            $removed++;
+        }
+    }
+    return $removed;
 }
 
 function op_sessions(string $dataDir, int $aliveTtl): void {
@@ -485,69 +546,6 @@ function op_sessions(string $dataDir, int $aliveTtl): void {
     json_ok(['sessions' => $out, 'alive_ttl' => $aliveTtl]);
 }
 
-function op_gc(string $dataDir, int $defaultClosedAge, int $defaultStaleAge): void {
-    // Admin-only: requires Bearer of ADMIN_SECRET (separate from RELAY_SECRET).
-    // Removes session dirs that are:
-    //   - closed AND closed_at older than closed_age_secs (default 7d), OR
-    //   - last_seen older than stale_age_secs (default 30d), OR
-    //   - orphaned (no readable meta.public.json — usually leftovers from
-    //     a partial register that never wrote meta).
-    if (!check_admin_auth()) { json_err(401, 'admin auth required'); }
-    $body = json_in();
-    $closedAge = max(0, (int)($body['closed_age_secs'] ?? $defaultClosedAge));
-    $staleAge  = max(0, (int)($body['stale_age_secs']  ?? $defaultStaleAge));
-    $dryRun    = !empty($body['dry_run']);
-    $now = time();
-    $removed = []; $kept = 0;
-    $realData = @realpath($dataDir);
-    foreach (glob($dataDir . '/*', GLOB_ONLYDIR) ?: [] as $dir) {
-        $name = basename($dir);
-        // Treat only hex-shaped basenames as session dirs. This skips
-        // data/push/ (the per-token-hash subscription tree), data/.cache/
-        // siblings, and any co-tenant-injected dirs that would otherwise
-        // hit the orphan branch and be wiped.
-        if (!preg_match('/^[a-f0-9]{6,64}$/', $name)) {
-            $kept++;
-            continue;
-        }
-        // Realpath sanity: refuse to recurse into a dir whose canonical
-        // path escapes $dataDir (defense-in-depth against symlink races
-        // in case the data/ dir is ever writeable by a co-tenant).
-        $real = @realpath($dir);
-        if ($realData === false || $real === false
-            || strncmp($real, $realData . DIRECTORY_SEPARATOR, strlen($realData) + 1) !== 0) {
-            $kept++;
-            continue;
-        }
-        $meta = read_public_meta($dir);
-        $reason = null;
-        if (!$meta) {
-            // Be conservative: only treat orphans as removable if old enough
-            // (otherwise we might race a register that's mid-write).
-            $age = $now - (int)@filemtime($dir);
-            if ($age > 3600) $reason = 'orphan';
-        } elseif (!empty($meta['closed']) && (int)($meta['closed_at'] ?? 0) > 0
-                  && $now - (int)$meta['closed_at'] > $closedAge) {
-            $reason = 'closed-stale';
-        } elseif ((int)($meta['last_seen'] ?? 0) > 0
-                  && $now - (int)$meta['last_seen'] > $staleAge) {
-            $reason = 'last-seen-stale';
-        }
-        if ($reason !== null) {
-            $removed[] = ['id' => $name, 'reason' => $reason];
-            if (!$dryRun) rrmdir($dir);
-        } else {
-            $kept++;
-        }
-    }
-    json_ok([
-        'removed' => $removed,
-        'removed_count' => count($removed),
-        'kept' => $kept,
-        'dry_run' => $dryRun,
-    ]);
-}
-
 function rrmdir(string $dir): void {
     if (!is_dir($dir)) return;
     // Top-level: if $dir is itself a symlink to a directory, is_dir
@@ -562,19 +560,6 @@ function rrmdir(string $dir): void {
         else @unlink($p);
     }
     @rmdir($dir);
-}
-
-function check_admin_auth(): bool {
-    if (!defined('ADMIN_SECRET') || ADMIN_SECRET === '' || ADMIN_SECRET === 'CHANGE_ME') {
-        return false; // GC is disabled until ADMIN_SECRET is configured.
-    }
-    $hdr = $_SERVER['HTTP_AUTHORIZATION'] ?? '';
-    if ($hdr === '' && function_exists('apache_request_headers')) {
-        $h = apache_request_headers();
-        $hdr = $h['Authorization'] ?? ($h['authorization'] ?? '');
-    }
-    if (!preg_match('/^Bearer\s+(.+)$/', $hdr, $m)) return false;
-    return hash_equals(ADMIN_SECRET, trim($m[1]));
 }
 
 function op_meta(string $dataDir): void {

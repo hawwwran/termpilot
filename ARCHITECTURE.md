@@ -52,10 +52,14 @@ The plaintext v1 was scrapped. The current implementation:
 - **Relay `?op=sessions`** returns ALL non-closed sessions with `alive`
   flag (TTL configurable via `ALIVE_TTL_SECS`, default 300 s) and
   `offline_secs`. The browser keeps stale sessions visible (greyed).
-- **Relay `?op=gc`** (admin-only — `ADMIN_SECRET` in `config.php`,
-  separate from `RELAY_SECRET`) prunes closed-stale, last-seen-stale,
-  and orphaned session dirs. Body accepts `closed_age_secs`,
-  `stale_age_secs`, `dry_run`. Intended for a host-side daily cron.
+- **Auto-GC on close**: every `op_close` runs `auto_gc_pass()` after
+  flushing its response (via `fastcgi_finish_request()` so the wrapper
+  doesn't wait). Removes session dirs where `closed_at` > `AUTO_GC_CLOSED_SECS`
+  (5 min default — explicit close, no client will reattach), `last_seen` >
+  `AUTO_GC_STALE_SECS` (1 h default — wrapper went silent but might
+  recover from a network blip), or orphans > 1 h old (no `meta.public.json`).
+  Hard-capped at 50 removals per pass; backlogs drain across subsequent
+  closes without making any one close slow.
 - **Browser connection-state badge** (●/◐/○) driven from `TPSession.api()`
   timestamps. Sessions that disappear from `/sessions` no longer detach
   the terminal view — the bar shows "offline" until the wrapper returns.
@@ -460,7 +464,7 @@ termpilot/
 │   │   ├── index.js           page-level UI logic
 │   │   ├── index.css          styles
 │   │   └── vendor/            xterm.js + jsQR (verbatim, pinned)
-│   ├── config.example.php     copy → config.php; optional RELAY_SECRET / ADMIN_SECRET
+│   ├── config.example.php     copy → config.php; optional RELAY_SECRET + auto-GC tunables
 │   └── .htaccess              deny data/, logs/, config.php; PWA MIME types
 │
 ├── tools/

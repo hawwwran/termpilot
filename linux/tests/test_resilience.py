@@ -11,8 +11,9 @@ Covers:
   - active.json: write + read + merge across calls.
   - relay.php /sessions: alive flag flips correctly with $ALIVE_TTL_SECS.
   - relay.php /sessions: stale (alive=false) sessions remain visible.
-  - relay.php /op=gc: requires admin auth; respects dry_run; removes the
-    closed-stale, last-seen-stale, and orphan dirs; keeps the live ones.
+  - relay.php auto-GC: every op_close triggers a cleanup pass that
+    removes closed-stale, last-seen-stale, and orphan dirs while keeping
+    live ones and non-session siblings (data/push/, co-tenant junk).
 
 Designed to run alongside test_e2e.py / test_wrapper_e2e.py without
 touching the user's real ~/.cache/termpilot or live keyring.
@@ -53,7 +54,6 @@ _loader.exec_module(ccwrap)
 PHP_PORT = 6021
 RELAY_BASE = f"http://127.0.0.1:{PHP_PORT}"
 RELAY_SECRET = "resilience-test-secret"
-ADMIN_SECRET = "resilience-test-admin"
 
 
 def wait_port(host: str, port: int, timeout: float = 5.0) -> bool:
@@ -230,13 +230,16 @@ class RelayResilienceTest(unittest.TestCase):
             if cls._orig_config.exists() else None
         if cls._backup_config:
             shutil.move(str(cls._orig_config), str(cls._backup_config))
-        # Configure with both auth secrets and a small ALIVE_TTL_SECS so we
-        # can flip alive=true → alive=false in 2 seconds rather than 5 min.
+        # Small ALIVE_TTL_SECS so the alive flag flips fast. Tight
+        # auto-GC thresholds so a few-seconds-old session counts as
+        # closed/last-seen-stale and we can assert removal in one test
+        # without waiting hours.
         (cls.docroot / "config.php").write_text(
             f"<?php\n"
             f"define('RELAY_SECRET', '{RELAY_SECRET}');\n"
-            f"define('ADMIN_SECRET', '{ADMIN_SECRET}');\n"
             f"define('ALIVE_TTL_SECS', 2);\n"
+            f"define('AUTO_GC_CLOSED_SECS', 1);\n"
+            f"define('AUTO_GC_STALE_SECS', 1);\n"
         )
         cls._data = cls.docroot / "data"
         if cls._data.exists():
@@ -266,14 +269,13 @@ class RelayResilienceTest(unittest.TestCase):
     def _conn(self):
         return http.client.HTTPConnection("127.0.0.1", PHP_PORT, timeout=10)
 
-    def _request(self, method, op, *, body=None, params=None,
-                 admin=False, no_auth=False):
+    def _request(self, method, op, *, body=None, params=None, no_auth=False):
         from urllib.parse import urlencode
         q = {"op": op, **(params or {})}
         path = "/relay.php?" + urlencode(q)
         h = {}
         if not no_auth:
-            h["Authorization"] = "Bearer " + (ADMIN_SECRET if admin else RELAY_SECRET)
+            h["Authorization"] = "Bearer " + RELAY_SECRET
         data = None
         if body is not None:
             data = json.dumps(body).encode()
@@ -287,6 +289,14 @@ class RelayResilienceTest(unittest.TestCase):
             except Exception: return r.status, {"raw": raw.decode("utf-8", errors="replace")}
         finally:
             c.close()
+
+    def _close(self, sid, password: str = "p"):
+        tok = crypto.derive_token(password)
+        secret_hex = crypto.derive_trigger_secret(tok).hex()
+        return self._request("POST", "close", body={
+            "session_id": sid,
+            "trigger_secret_hex": secret_hex,
+        })
 
     def _register(self, sid: str, password: str = "p"):
         tok = crypto.derive_token(password)
@@ -350,115 +360,96 @@ class RelayResilienceTest(unittest.TestCase):
         })
         self.assertEqual(st, 401, "wrong trigger_secret_hex must be 401")
 
-    def test_gc_requires_admin_auth(self):
-        # No auth at all
-        st, _ = self._request("POST", "gc", body={}, no_auth=True)
-        self.assertEqual(st, 401)
-        # RELAY_SECRET is not enough — must use ADMIN_SECRET
-        st, body = self._request("POST", "gc", body={})
-        self.assertEqual(st, 401, body)
-
-    def test_gc_dry_run_lists_without_deleting(self):
-        sid_live = "11aa00aa00aa"
-        sid_closed_old = "22bb00aa00aa"
-        self._register(sid_live)
-        self._register(sid_closed_old)
-        # Mark sid_closed_old as closed long ago by stomping its meta.
-        meta_path = self._data / sid_closed_old / "meta.public.json"
-        meta = json.loads(meta_path.read_text())
-        meta["closed"] = True
-        meta["closed_at"] = int(time.time()) - 30 * 24 * 3600  # 30d ago
-        meta_path.write_text(json.dumps(meta))
-        # Dry run with closed_age_secs=1 → closed_old should be listed but not deleted.
-        st, body = self._request("POST", "gc",
-                                 admin=True,
-                                 body={"closed_age_secs": 1, "dry_run": True})
-        self.assertEqual(st, 200, body)
-        self.assertTrue(body["dry_run"])
-        ids = [r["id"] for r in body["removed"]]
-        self.assertIn(sid_closed_old, ids)
-        self.assertNotIn(sid_live, ids)
-        # Both dirs still on disk
-        self.assertTrue((self._data / sid_closed_old).is_dir())
-        self.assertTrue((self._data / sid_live).is_dir())
-
-    def test_gc_deletes_closed_stale_and_keeps_live(self):
-        sid_live = "33cc00aa00aa"
-        sid_closed = "44dd00aa00aa"
-        sid_orphan = "55ee00aa00aa"
-        self._register(sid_live)
-        self._register(sid_closed)
-        # Closed long ago
-        meta_p = self._data / sid_closed / "meta.public.json"
+    def test_auto_gc_removes_closed_stale_on_next_close(self):
+        # Two sessions. Backdate the first's closed_at past the (tiny)
+        # AUTO_GC_CLOSED_SECS, then close the second — its op_close
+        # triggers the cleanup pass that sweeps the first.
+        sid_old = "aaaa00000001"
+        sid_new = "aaaa00000002"
+        self._register(sid_old)
+        self._register(sid_new)
+        meta_p = self._data / sid_old / "meta.public.json"
         meta = json.loads(meta_p.read_text())
         meta["closed"] = True
-        meta["closed_at"] = int(time.time()) - 30 * 24 * 3600
+        meta["closed_at"] = int(time.time()) - 3600  # 1h ago ≫ threshold
         meta_p.write_text(json.dumps(meta))
-        # Orphan: dir without meta. Make its mtime old enough that GC's
-        # 1-hour orphan grace doesn't keep it alive.
+
+        st, _ = self._close(sid_new)
+        self.assertEqual(st, 200)
+        self.assertFalse((self._data / sid_old).exists(),
+                         "closed-stale session must be removed by auto-GC")
+        self.assertTrue((self._data / sid_new).exists(),
+                        "just-closed session is fresh; survives this pass")
+
+    def test_auto_gc_removes_last_seen_stale_on_next_close(self):
+        # Wrapper-silent path: session has no closed flag but last_seen
+        # is old (e.g. wrapper died without an op_close).
+        sid_old = "bbbb00000001"
+        sid_new = "bbbb00000002"
+        self._register(sid_old)
+        self._register(sid_new)
+        meta_p = self._data / sid_old / "meta.public.json"
+        meta = json.loads(meta_p.read_text())
+        meta.pop("closed", None)
+        meta.pop("closed_at", None)
+        meta["last_seen"] = int(time.time()) - 3600  # 1h ago ≫ threshold
+        meta_p.write_text(json.dumps(meta))
+
+        st, _ = self._close(sid_new)
+        self.assertEqual(st, 200)
+        self.assertFalse((self._data / sid_old).exists(),
+                         "last-seen-stale session must be removed by auto-GC")
+
+    def test_auto_gc_removes_orphan_dirs(self):
+        # Orphan (no meta.public.json) — created when register half-runs.
+        # Only swept when older than the 1h hardcoded orphan grace.
+        sid_orphan = "cccc00000001"
+        sid_trigger = "cccc00000002"
+        self._register(sid_trigger)
         orphan_dir = self._data / sid_orphan
         orphan_dir.mkdir()
         old = time.time() - 7200  # 2h ago
         os.utime(orphan_dir, (old, old))
 
-        st, body = self._request("POST", "gc",
-                                 admin=True,
-                                 body={"closed_age_secs": 1})
-        self.assertEqual(st, 200, body)
-        ids = [r["id"] for r in body["removed"]]
-        self.assertIn(sid_closed, ids, "closed-stale must be removed")
-        self.assertIn(sid_orphan, ids, "orphan dir must be removed")
-        self.assertNotIn(sid_live, ids, "live must NOT be removed")
-        # Verify on disk
-        self.assertFalse((self._data / sid_closed).exists())
-        self.assertFalse((self._data / sid_orphan).exists())
-        self.assertTrue((self._data / sid_live).exists())
+        st, _ = self._close(sid_trigger)
+        self.assertEqual(st, 200)
+        self.assertFalse(orphan_dir.exists(),
+                         "old orphan dir must be removed by auto-GC")
 
-    def test_gc_skips_non_session_dirs(self):
-        # data/push/ holds per-token push subscriptions. Its basename
-        # isn't hex, and it has no meta.public.json, so the old orphan
-        # branch happily wiped the whole subscription tree on the first
-        # stale-cron run. After the fix, anything not matching the
-        # session-id regex is left alone.
-        sid_live = "ccc1aaaabbbb"
+    def test_auto_gc_keeps_live_sessions_and_non_session_dirs(self):
+        # Live session + push subscription tree + co-tenant junk all
+        # must survive a close that triggers auto-GC.
+        sid_live = "dddd00000001"
+        sid_trigger = "dddd00000002"
         self._register(sid_live)
-        # Fake a push subscription tree (no meta).
+        self._register(sid_trigger)
+        # Push subscription tree (no meta, non-hex basename in the chain
+        # from data/push/<token_hash>/).
         push_dir = self._data / "push" / ("a" * 64)
         push_dir.mkdir(parents=True)
         sub_file = push_dir / "deadbeefdeadbeefdeadbeefdeadbeef.json"
         sub_file.write_text(json.dumps({"id": "x", "endpoint": "https://fcm.googleapis.com/abc"}))
-        # Age its mtime past the GC orphan threshold (1h) so the old
-        # buggy code would have removed it.
+        # Co-tenant-style sibling (non-hex name).
+        sibling = self._data / "wat"
+        sibling.mkdir()
         old = time.time() - 7200
         os.utime(push_dir, (old, old))
         os.utime(self._data / "push", (old, old))
-        # And drop a co-tenant-style sibling that doesn't match the
-        # session-id regex — also must survive.
-        sibling = self._data / "wat"
-        sibling.mkdir()
         os.utime(sibling, (old, old))
 
-        st, body = self._request("POST", "gc",
-                                 admin=True,
-                                 body={"closed_age_secs": 1})
-        self.assertEqual(st, 200, body)
-        ids = [r["id"] for r in body["removed"]]
-        self.assertNotIn("push", ids, "data/push/ must not be wiped by GC")
-        self.assertNotIn("wat", ids, "non-hex-name dir must not be wiped by GC")
-        # Confirm on disk too
-        self.assertTrue(push_dir.is_dir(), "push subscription dir survived")
-        self.assertTrue(sub_file.exists(), "push subscription file survived")
-        self.assertTrue(sibling.is_dir(), "non-hex sibling survived")
+        st, _ = self._close(sid_trigger)
+        self.assertEqual(st, 200)
+        self.assertTrue((self._data / sid_live).is_dir(),
+                        "live session must survive")
+        self.assertTrue(push_dir.is_dir(), "push/<hash>/ must survive")
+        self.assertTrue(sub_file.exists(), "push subscription file must survive")
+        self.assertTrue(sibling.is_dir(), "non-hex sibling must survive")
 
-    def test_gc_admin_disabled_returns_401_when_secret_unset(self):
-        # Re-write config without ADMIN_SECRET, then re-issue the gc call.
-        # We restore the original config in tearDown of the class, but for
-        # this test we tear down + bring up in-place. Instead, we'll send
-        # an obviously-wrong admin token and verify 401 — the same code
-        # path covers "admin disabled" because hash_equals fails.
-        st, _ = self._request("POST", "gc", body={},
-                              params=None)  # uses RELAY_SECRET → 401
-        self.assertEqual(st, 401)
+    def test_gc_endpoint_is_removed(self):
+        # Defense against accidentally re-adding the admin endpoint:
+        # ?op=gc must not be routable.
+        st, body = self._request("POST", "gc", body={})
+        self.assertEqual(st, 404, body)
 
 
 if __name__ == "__main__":

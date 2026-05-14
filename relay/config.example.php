@@ -13,19 +13,12 @@
 // unset (probed via ?op=auth_required).
 // define('RELAY_SECRET', 'CHANGE_ME');
 
-// Optional: separate admin secret for the ?op=gc endpoint. Leave unset
-// (or 'CHANGE_ME') to disable GC entirely. Generate with `openssl rand -hex 32`.
-// Use from a host-side cron, e.g.:
-//   curl -X POST -H "Authorization: Bearer $ADMIN_SECRET" \
-//        -H "Content-Type: application/json" -d '{}' \
-//        https://your.host/SERVICES/termpilot/relay.php?op=gc
-// define('ADMIN_SECRET', 'CHANGE_ME');
-
 // Optional: tune the live/offline cutoff (seconds since last heartbeat).
 // Default 300s (5 min). Sessions older are returned with alive=false; they
-// remain visible (not hidden) until either ?op=close or GC removes them.
+// remain visible (not hidden) until auto-GC removes them.
 // define('ALIVE_TTL_SECS', 300);
 
-// Optional: GC cutoffs in seconds. Defaults shown.
-// define('GC_CLOSED_AGE_SECS', 7 * 24 * 3600);   // 7d after close
-// define('GC_STALE_AGE_SECS', 30 * 24 * 3600);   // 30d since last_seen
+// Optional: auto-GC cutoffs. Every op_close triggers a cleanup pass with
+// these thresholds. Defaults shown.
+// define('AUTO_GC_CLOSED_SECS', 5 * 60);    // cleanly-closed sessions
+// define('AUTO_GC_STALE_SECS',  60 * 60);   // wrapper went silent (might be a network blip)
