@@ -165,13 +165,29 @@ function applyTheme(theme) {
   set("--tp-accent-fg", _mix(fg, accent, 0.25));
   set("--tp-accent-meta", _mix(accent, fg, 0.30));
 
-  // Semantic
+  // Semantic. The warn pills/badges (.kbd-latched-pill, .sb-offline-tag,
+  // .stale-pill) render warn text on a warn-bg background, so warn-bg
+  // must contrast with BOTH the page bg AND the warn text. On dark
+  // themes mixing bg toward warn gives a dark brown — high contrast. On
+  // light themes the same formula produces a near-white wash (e.g.
+  // github + yellow → pale yellow on white) with poor contrast against
+  // both the page and the warn text. For light themes mix warn toward
+  // fg instead, yielding a darker amber that reads against both.
+  // warn-bg-soft stays as a faint warn wash either way (used as a
+  // large-area background where saturation, not contrast, is the goal).
   set("--tp-success", success);
   set("--tp-warn", warn);
-  set("--tp-warn-bg",      _mix(bg, warn, 0.22));
-  set("--tp-warn-bg-soft", _mix(bg, warn, 0.08));
-  set("--tp-warn-border",  _mix(bg, warn, 0.45));
-  set("--tp-warn-hover",   _mix(bg, warn, 0.30));
+  if (theme.isLight) {
+    set("--tp-warn-bg",      _mix(warn, fg, 0.30));
+    set("--tp-warn-bg-soft", _mix(bg, warn, 0.18));
+    set("--tp-warn-border",  _mix(warn, fg, 0.20));
+    set("--tp-warn-hover",   _mix(warn, fg, 0.40));
+  } else {
+    set("--tp-warn-bg",      _mix(bg, warn, 0.22));
+    set("--tp-warn-bg-soft", _mix(bg, warn, 0.08));
+    set("--tp-warn-border",  _mix(bg, warn, 0.45));
+    set("--tp-warn-hover",   _mix(bg, warn, 0.30));
+  }
   set("--tp-error", error);
 
   set("--tp-netq-slow", warn);
@@ -592,9 +608,11 @@ function openThemePickerModal(opts = {}) {
   const currentHtml = (pref === "system")
     ? systemTileHtml(true)
     : (resolved ? cardHtml(resolved, true) : "");
-  const currentLabel = (pref === "system" && resolved)
-    ? `System default — currently ${escapeHtml(resolved.name)}`
-    : (resolved ? escapeHtml(resolved.name) : "(unknown)");
+  // Show "currently <name>" only in system mode — for manual picks the
+  // card itself already shows the name and a second label is redundant.
+  const currentMetaHtml = (pref === "system" && resolved)
+    ? `<div class="theme-current-meta">System default — currently ${escapeHtml(resolved.name)}</div>`
+    : "";
 
   back.innerHTML = `
     <div class="modal theme-modal" role="dialog" aria-modal="true" aria-label="Theme picker">
@@ -605,7 +623,7 @@ function openThemePickerModal(opts = {}) {
       <label>Current</label>
       <div class="theme-current">
         ${currentHtml}
-        <div class="theme-current-meta">${currentLabel}</div>
+        ${currentMetaHtml}
       </div>
 
       <div class="theme-sep"></div>
@@ -621,6 +639,13 @@ function openThemePickerModal(opts = {}) {
       </div>
     </div>`;
   document.body.appendChild(back);
+
+  // Restore grid scroll position if we were re-rendered after a click,
+  // so the user doesn't lose their place when picking deep in the list.
+  const grid = back.querySelector(".theme-grid");
+  if (grid && typeof opts.gridScrollTop === "number") {
+    grid.scrollTop = opts.gridScrollTop;
+  }
 
   back.addEventListener("click", (e) => {
     if (e.target === back) { back.remove(); }
@@ -641,9 +666,11 @@ function openThemePickerModal(opts = {}) {
       }
       onChange();
       // Re-render the picker so aria-pressed + the Current section
-      // reflect the new selection. Matches the openTokenModal pattern.
+      // reflect the new selection. Stash scrollTop so the user does not
+      // lose their place when clicking a tile near the bottom.
+      const gridScrollTop = grid ? grid.scrollTop : 0;
       back.remove();
-      openThemePickerModal({ onChange });
+      openThemePickerModal({ onChange, gridScrollTop });
     });
   });
 }
