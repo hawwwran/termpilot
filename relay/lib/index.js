@@ -506,6 +506,127 @@ let sessionAlive = true;     // server says wrapper has heartbeated recently
 let sessionMissing = false;  // session id not currently in the /sessions list
 const setStatus = t => document.getElementById("connstatus").textContent = t;
 
+/* ===== Slow-network detection ========================================= */
+// Long-poll means "fetch duration" alone is ambiguous: a quiet session and
+// a slow link both produce long durations. Two signals disambiguate:
+//   1) For polls that returned records, the relay had data ready, so the
+//      duration ≈ network RTT + download. A rolling mean above a threshold
+//      = slow link.
+//   2) `total - next_seq` after we drain a batch is the queue the relay
+//      still holds for us. If that stays high across consecutive polls,
+//      we're falling behind the producer regardless of latency.
+// Catchup samples are excluded — the first attach pulls a big history.
+const NET_WINDOW = 6;
+const NET_SLOW_DURATION_MS = 1500;
+const NET_SEVERE_DURATION_MS = 4000;
+const NET_BACKLOG_THRESH = 20;
+const NET_BACKLOG_CONSEC = 3;
+const _netSamples = [];
+let _netBacklogStreak = 0;
+let _netState = "ok";
+let _netForcedSevere = false;
+
+function _netRecord(duration, hadRecords, backlog) {
+  _netSamples.push({ duration, hadRecords, backlog });
+  if (_netSamples.length > NET_WINDOW) _netSamples.shift();
+  _netBacklogStreak = backlog >= NET_BACKLOG_THRESH ? _netBacklogStreak + 1 : 0;
+  _netForcedSevere = false;
+  _netRefreshBanner();
+}
+
+function _netReset() {
+  _netSamples.length = 0;
+  _netBacklogStreak = 0;
+  _netForcedSevere = false;
+  _setNetBanner("ok");
+}
+
+function _netMarkFetchError() {
+  // fetch() rejected (DNS, TLS, hard offline). Treat as severe until the
+  // next successful poll clears it.
+  _netForcedSevere = true;
+  _netRefreshBanner();
+}
+
+// Inflight-input tracker: surfaces the slow-banner while an input POST is
+// hanging, rather than waiting for it to return. Counter (not boolean) so
+// overlapping sends don't clear the flag prematurely.
+let _netInflightCount = 0;
+let _netInflightTimer = null;
+let _netInflightSlow = false;
+function _netInflightStart() {
+  _netInflightCount++;
+  if (_netInflightTimer) return;
+  _netInflightTimer = setTimeout(() => {
+    _netInflightTimer = null;
+    _netInflightSlow = true;
+    _netRefreshBanner();
+  }, NET_SLOW_DURATION_MS);
+}
+function _netInflightEnd() {
+  _netInflightCount = Math.max(0, _netInflightCount - 1);
+  if (_netInflightCount > 0) return;
+  if (_netInflightTimer) { clearTimeout(_netInflightTimer); _netInflightTimer = null; }
+  if (_netInflightSlow) {
+    _netInflightSlow = false;
+    _netRefreshBanner();
+  }
+}
+
+function _netEvaluate() {
+  if (!navigator.onLine || _netForcedSevere) return "severe";
+  if (_netInflightSlow) return "slow";
+  const withRecs = _netSamples.filter(s => s.hadRecords);
+  // Single-sample trigger — needed for fast feedback on the first slow
+  // input POST. The user just typed Enter; if that round-trip took 2s,
+  // we want the banner up immediately, not after three more samples.
+  // Auto-clears as soon as the next sample comes in fast.
+  const last = withRecs[withRecs.length - 1];
+  if (last) {
+    if (last.duration >= NET_SEVERE_DURATION_MS) return "severe";
+    if (last.duration >= NET_SLOW_DURATION_MS) return "slow";
+  }
+  // Rolling-mean backstop — catches the case where each sample is below
+  // the single-shot threshold but the link is consistently mediocre.
+  if (withRecs.length >= 3) {
+    const mean = withRecs.reduce((a, s) => a + s.duration, 0) / withRecs.length;
+    if (mean >= NET_SEVERE_DURATION_MS) return "severe";
+    if (mean >= NET_SLOW_DURATION_MS) return "slow";
+  }
+  if (_netBacklogStreak >= NET_BACKLOG_CONSEC) return "slow";
+  return "ok";
+}
+
+function _netRefreshBanner() {
+  _setNetBanner(_netEvaluate());
+}
+
+function _setNetBanner(state) {
+  if (state === _netState) return;
+  _netState = state;
+  const el = document.getElementById("termpilot-net-banner");
+  const msg = document.getElementById("termpilot-net-banner-msg");
+  if (!el || !msg) return;
+  if (state === "ok") {
+    el.hidden = true;
+    el.classList.remove("severe");
+    return;
+  }
+  if (state === "severe") {
+    el.classList.add("severe");
+    msg.textContent = navigator.onLine
+      ? "Connection very slow — terminal may be far behind."
+      : "Offline — waiting for connection.";
+  } else {
+    el.classList.remove("severe");
+    msg.textContent = "Slow network — terminal may lag behind.";
+  }
+  el.hidden = false;
+}
+
+window.addEventListener("online", _netRefreshBanner);
+window.addEventListener("offline", _netRefreshBanner);
+
 function renderSessions(groups, orphans) {
   const host = document.getElementById("sessions-host");
   if (groups.every(g => g.sessions.length === 0)) {
@@ -774,6 +895,7 @@ function detach(reason) {
   if (currentSid) TPSession.detachSessionForSync(currentSid);
   currentSid = null; currentTokenId = null; currentKey = null;
   outNextSeq = 0; inNextSeq = 0;
+  _netReset();
   // Don't reset/clear the previous term — it lives in the cache.
   logEl.innerHTML = "";
   hideLogLoader();
@@ -842,6 +964,7 @@ function _concatBytes(chunks) {
 
 async function pollLoop(sid) {
   pollAbort = new AbortController();
+  _netReset();
   // Treat the first batch(es) as catchup: pull bigger pages and skip
   // intermediate renders so a long history doesn't visibly play back.
   let catchingUp = true;
@@ -853,12 +976,15 @@ async function pollLoop(sid) {
   let decryptFails = 0;
   const DECRYPT_FAIL_ABORT = 5;
   while (currentSid === sid && !pollAbort.signal.aborted) {
+    const _netT0 = performance.now();
+    const _netCatchupSample = catchingUp;
     try {
       const params = { session: sid, since_seq: outNextSeq };
       if (catchingUp) params.limit = 500;
       const { status, body } = await TPSession.api(RELAY, "output", {
         params, signal: pollAbort.signal,
       });
+      const _netDuration = performance.now() - _netT0;
       if (status === 401 || status === 403) {
         // Auth wedged. Tight-loop retrying every second burns the
         // user's data plan and the relay's quota; surface the problem
@@ -920,8 +1046,12 @@ async function pollLoop(sid) {
         catchingUp = false;
       }
       outNextSeq = next;
+      if (!_netCatchupSample) {
+        _netRecord(_netDuration, records.length > 0, Math.max(0, total - next));
+      }
     } catch (e) {
       if (pollAbort.signal.aborted) return;
+      _netMarkFetchError();
       setStatus("poll error: " + e.message);
       await sleep(1000);
     }
@@ -951,12 +1081,25 @@ async function _postInputOnce(plain) {
     const seq = inNextSeq;
     const blob = await TP.encryptB64(key, plain, TP.aadRecord("in", sid, seq));
     if (currentSid !== sid || currentKey !== key) return false;
-    const { status, body } = await TPSession.api(RELAY, "input", {
-      method: "POST",
-      body: { session_id: sid, records: [{ seq, blob }] },
-    });
+    const _netT0 = performance.now();
+    _netInflightStart();
+    let status, body;
+    try {
+      ({ status, body } = await TPSession.api(RELAY, "input", {
+        method: "POST",
+        body: { session_id: sid, records: [{ seq, blob }] },
+      }));
+    } finally {
+      _netInflightEnd();
+    }
+    const _netDuration = performance.now() - _netT0;
     if (currentSid !== sid) return false;
     if (status === 200) {
+      // Input POST is short-poll, so duration is a pure RTT probe — feed
+      // it to the slow-network detector so the banner can light up on
+      // the user's first slow send instead of waiting for output to
+      // round-trip back through the wrapper.
+      _netRecord(_netDuration, true, 0);
       inNextSeq = Number(body.next_seq || seq + 1);
       TPSession.updateSessionNextSeq(sid, inNextSeq);
       return true;
@@ -990,6 +1133,7 @@ async function sendInputBytes(plain) {
     }
     return ok;
   } catch (e) {
+    _netMarkFetchError();
     TPSession.enqueuePendingSend(currentSid, _bytesToB64(plain));
     setStatus("queued (send error: " + e.message + ")");
     return false;
