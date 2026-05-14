@@ -54,7 +54,10 @@ for the full notes (Credential Manager, ConPTY caveats, log mirroring).
 host. The Linux/macOS quickstart covers `RELAY_SECRET` and `.htaccess`.
 Session data is cleaned up automatically: every `op_close` triggers an
 auto-GC pass (5-min cutoff for cleanly-closed sessions, 1-hour cutoff
-for silently-dead ones — both tunable in `config.php`).
+for silently-dead ones — both tunable in `config.php`). The browser
+PWA includes a colour-theme picker (Settings → Theme; 64 themes ported
+from [storm119/Tilix-Themes](https://github.com/storm119/Tilix-Themes),
+follows `prefers-color-scheme` by default).
 
 ## Architecture, threat model, ops notes
 

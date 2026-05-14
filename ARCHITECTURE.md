@@ -233,6 +233,42 @@ deliberately **content-free** so no session content leaks through them.
   `GET ?op=push_pubkey`, `POST ?op=push_subscribe`,
   `POST ?op=push_unsubscribe`, `POST ?op=push_notify`.
 
+### Theme picker (landed 2026-05-14)
+
+64 colour themes from [storm119/Tilix-Themes](https://github.com/storm119/Tilix-Themes)
+bundled into the browser app. With no manual pick the picker follows
+the OS `prefers-color-scheme`; manual selections win and persist via
+`localStorage["termpilot-theme"]`. Defaults: dark = One Dark, light =
+GitHub.
+
+- **Bundle**: `relay/lib/themes.js` exports `window.TPThemes =
+  { THEMES, DEFAULT_DARK_ID, DEFAULT_LIGHT_ID }`. Each theme is
+  normalised to `{ id, name, fg, bg, palette[16], isLight, comment }`.
+  Generated from upstream by `tools/themes-fetch.sh` (a single
+  upstream commit SHA + SHA-256 of the bundle are recorded in
+  `relay/lib/THEMES_NOTICE`). Bundle is committed verbatim.
+- **License posture**: Tilix-Themes has no LICENSE file; its README
+  credits "the original theme authors". The bundle ships under
+  attribution-only with a takedown-on-request line in `THEMES_NOTICE`.
+- **Application**: `applyTheme()` in `relay/lib/index.js` does three
+  things on switch — (1) mutates the `ANSI16` array contents in place
+  so `cellStyle()` picks up the new colours on the next render, (2)
+  writes ~25 `--tp-*` CSS custom properties on `:root` (theme bg/fg
+  drive surfaces and borders via an in-JS `_mix()` helper — no
+  `color-mix()` dependency for Safari ≤ 16.4), (3) flips
+  `documentElement.style.colorScheme` so native scrollbars and form
+  controls match.
+- **Light vs dark warn-bg**: derivation branches on `theme.isLight`.
+  Dark themes mix bg → warn (warm pill on dark page); light themes
+  mix warn → fg (dark amber pill on light page). Same formula on a
+  light theme would produce a near-white wash with poor contrast.
+- **Headless xterm**: the visible terminal is a `<pre>` rendered from
+  synthetic spans driven by `ANSI16` — xterm itself runs offscreen.
+  Theming therefore touches the array, not xterm's `theme` option.
+- **CSS variable defaults** in `relay/lib/index.css` `:root` reproduce
+  the pre-themes dark palette byte-identically, so the picker is purely
+  additive — if `themes.js` fails to load the app still renders.
+
 ## Threat model
 
 | actor                       | sees plaintext? |
@@ -502,8 +538,10 @@ termpilot/
 │   ├── lib/
 │   │   ├── crypto.js          JS port of shared/crypto.py (WebCrypto AES-GCM)
 │   │   ├── session.js         multi-token enumeration + per-session key cache
-│   │   ├── index.js           page-level UI logic
-│   │   ├── index.css          styles
+│   │   ├── index.js           page-level UI logic + theme system
+│   │   ├── index.css          styles (uses --tp-* CSS vars set by applyTheme)
+│   │   ├── themes.js          bundled colour themes (window.TPThemes; generated)
+│   │   ├── THEMES_NOTICE      attribution + SHA-256 pin for the bundle
 │   │   └── vendor/            xterm.js + jsQR (verbatim, pinned)
 │   ├── config.example.php     copy → config.php; optional RELAY_SECRET + auto-GC tunables
 │   └── .htaccess              deny data/, logs/, config.php; PWA MIME types
@@ -513,6 +551,7 @@ termpilot/
 │   ├── deploy.sh              upload relay/ over FTPS
 │   ├── fetch-logs.sh          pull relay logs via FTP
 │   ├── vendor-fetch.sh        refresh pinned browser deps under relay/lib/vendor/
+│   ├── themes-fetch.sh        regenerate relay/lib/themes.js from upstream Tilix-Themes
 │   └── build-release.sh       build per-platform release zips locally
 │
 └── .github/workflows/release.yml CI: on v* tag, build + attach both zips
@@ -643,6 +682,9 @@ which is a no-op in dev anyway.
    relay-secret field appears only when the relay has `RELAY_SECRET`
    configured.
 3. "Manage tokens" button later for additional devices or rotation.
+4. Settings → "Theme" opens a picker with all bundled themes; selection
+   persists via `localStorage["termpilot-theme"]`. Default tracks
+   `prefers-color-scheme`.
 
 ## Testing
 
