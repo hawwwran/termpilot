@@ -75,7 +75,17 @@ if (!is_dir($DATA_DIR)) { json_err(500, 'data/ not writable'); }
 ensure_data_perms($DATA_DIR);
 
 // Tunables
-$LONG_POLL_SECS  = 25;
+// LONG_POLL_SECS: how long the relay's records GET will block waiting
+// for new data before returning empty. Each long-poll occupies one
+// PHP-FPM worker for its entire dwell time (relay polls the idx file
+// every $POLL_INTERVAL_US — there's no kernel-level wake on shared
+// hosting). On hosts with low pm.max_children (5-10 typical), high
+// values starve workers: a contending POST queues for up to this many
+// seconds at the FastCGI gateway before a worker frees up. Was 25;
+// dropped to 5 after observing 9.7s p95 wall-time on debug.php?op=ping
+// while real session traffic was active — the diagnostic was queued
+// behind two long-polls (wrapper input + browser output).
+$LONG_POLL_SECS  = 5;
 $POLL_INTERVAL_US = 100_000;
 $MAX_CHUNK_BYTES = 256 * 1024;
 $DEFAULT_LIMIT   = 100;

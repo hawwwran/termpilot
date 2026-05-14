@@ -36,6 +36,7 @@ import fcntl
 import glob
 import hashlib
 import http.client
+import io
 import json
 import os
 import pty
@@ -1235,34 +1236,104 @@ class Relay:
     MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 
     def __init__(self, base: str, secret: str, insecure: bool = False):
+        from urllib.parse import urlparse
         self.base = base.rstrip("?")
         self.secret = secret
+        self.insecure = insecure
         self.ctx = ssl._create_unverified_context() if insecure else ssl.create_default_context()
-        # Custom opener so all relay HTTPS traffic goes through
-        # happy-eyeballs. Built once per Relay; reused for the lifetime
-        # of the wrapper. urllib.build_opener won't add a second
-        # HTTPSHandler when one is already supplied.
-        self._opener = urllib.request.build_opener(_HEHTTPSHandler(context=self.ctx))
+        u = urlparse(self.base)
+        if not u.hostname:
+            raise ValueError(f"relay URL has no host: {base!r}")
+        self.scheme = u.scheme or "https"
+        self.host = u.hostname
+        self.port = u.port or (443 if self.scheme == "https" else 80)
+        # Path including the relay.php script — request paths are built
+        # by appending ?op=... to this.
+        self.path = u.path or "/"
+        # Connection pooling: each thread (output_uploader, input_poller,
+        # heartbeat, main) gets its own persistent http.client connection
+        # so requests reuse the TLS handshake. urllib's build_opener does
+        # NOT pool — without this, every record POST pays ~2 RTT of TLS
+        # handshake, capping wrapper-side throughput at ~10 records/sec
+        # on a 20 ms RTT link.
+        self._tls = threading.local()
 
-    def _url(self, op: str, **params):
-        from urllib.parse import urlencode
-        q = {"op": op, **{k: str(v) for k, v in params.items() if v is not None}}
-        sep = "&" if "?" in self.base else "?"
-        return f"{self.base}{sep}{urlencode(q)}"
+    def _new_conn(self, timeout: float):
+        if self.scheme == "https":
+            return _HEHTTPSConnection(self.host, self.port,
+                                      context=self.ctx, timeout=timeout)
+        return http.client.HTTPConnection(self.host, self.port, timeout=timeout)
+
+    def _get_conn(self, timeout: float):
+        c = getattr(self._tls, "conn", None)
+        if c is None:
+            c = self._new_conn(timeout)
+            self._tls.conn = c
+        else:
+            # http.client.HTTPConnection.timeout is read each .request().
+            c.timeout = timeout
+        return c
+
+    def _drop_conn(self):
+        c = getattr(self._tls, "conn", None)
+        if c is not None:
+            try: c.close()
+            except Exception: pass
+        self._tls.conn = None
 
     def request(self, method: str, op: str, *, params=None, body=None, timeout=30.0):
-        url = self._url(op, **(params or {}))
+        from urllib.parse import urlencode
+        q = {"op": op, **{k: str(v) for k, v in (params or {}).items() if v is not None}}
+        sep = "&" if "?" in self.path else "?"
+        path = f"{self.path}{sep}{urlencode(q)}"
+
         data = json.dumps(body).encode() if body is not None else None
-        req = urllib.request.Request(url, data=data, method=method)
+        headers = {"Connection": "keep-alive", "Accept": "application/json"}
         if self.secret:
-            req.add_header("Authorization", f"Bearer {self.secret}")
+            headers["Authorization"] = f"Bearer {self.secret}"
         if data is not None:
-            req.add_header("Content-Type", "application/json")
-        with self._opener.open(req, timeout=timeout) as r:
-            raw = r.read(self.MAX_RESPONSE_BYTES + 1)
-            if len(raw) > self.MAX_RESPONSE_BYTES:
-                raise RuntimeError(f"relay response > {self.MAX_RESPONSE_BYTES} bytes")
-            return json.loads(raw.decode("utf-8"))
+            headers["Content-Type"] = "application/json"
+
+        # One retry on a stale keep-alive socket. After a successful
+        # response or a 4xx/5xx from the server, the connection stays
+        # in the thread-local for the next call.
+        last_stale = None
+        for attempt in range(2):
+            conn = self._get_conn(timeout)
+            try:
+                conn.request(method, path, body=data, headers=headers)
+                r = conn.getresponse()
+                raw = r.read(self.MAX_RESPONSE_BYTES + 1)
+                if len(raw) > self.MAX_RESPONSE_BYTES:
+                    self._drop_conn()
+                    raise RuntimeError(f"relay response > {self.MAX_RESPONSE_BYTES} bytes")
+                if r.status >= 400:
+                    # Mimic urllib.error.HTTPError so existing callers'
+                    # `except urllib.error.HTTPError as e: e.code; e.read()`
+                    # paths still work unchanged.
+                    raise urllib.error.HTTPError(
+                        f"{self.scheme}://{self.host}{path}",
+                        r.status, r.reason, r.msg, io.BytesIO(raw),
+                    )
+                return json.loads(raw.decode("utf-8"))
+            except urllib.error.HTTPError:
+                raise
+            except (http.client.RemoteDisconnected,
+                    ConnectionResetError, BrokenPipeError,
+                    http.client.BadStatusLine,
+                    http.client.CannotSendRequest) as e:
+                # Server closed an idle keep-alive socket. Discard and
+                # retry once with a fresh connection.
+                self._drop_conn()
+                last_stale = e
+                if attempt == 1:
+                    raise
+                continue
+            except Exception:
+                self._drop_conn()
+                raise
+        # Unreachable: the loop either returns or raises.
+        raise last_stale if last_stale else RuntimeError("relay.request: unreachable")
 
 
 def _print_startup_banner(sid: str, spool_count: int, spool_bytes: int) -> None:

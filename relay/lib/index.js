@@ -388,9 +388,22 @@ async function runConnectionDiagnostic(secret) {
     }
   }
   lines.push("");
-  const p50net = net.length ? [...net].sort((a, b) => a - b)[net.length >> 1] : 0;
-  const p50srv = ping.length ? [...ping.map(p => p.server)].sort((a, b) => a - b)[ping.length >> 1] : 0;
-  if (p50net > 500) {
+  const pct = (arr, p) => {
+    if (!arr.length) return 0;
+    const s = [...arr].sort((a, b) => a - b);
+    return s[Math.max(0, Math.round(s.length * p) - 1)];
+  };
+  const p50net = pct(net, 0.5);
+  const p50srv = pct(ping.map(p => p.server), 0.5);
+  const p50wall = pct(ping.map(p => p.wall), 0.5);
+  const p95wall = pct(ping.map(p => p.wall), 0.95);
+  // Queueing signature — server time stays low but wall p95 spikes:
+  // request sat in the FastCGI gateway waiting for a worker to free up.
+  if (p95wall > 1000 && p95wall > p50wall * 5 && p50srv < 50) {
+    lines.push(`Verdict: RELAY QUEUEING (p50 ${p50wall.toFixed(0)} ms, p95 ${p95wall.toFixed(0)} ms wall;`);
+    lines.push(`  server-time stays at ${p50srv.toFixed(1)} ms). PHP-FPM workers look exhausted —`);
+    lines.push("  most likely the long-polls from active sessions are tying up the pool.");
+  } else if (p50net > 500) {
     lines.push(`Verdict: NETWORK looks slow (p50 RTT-overhead ${p50net.toFixed(0)} ms).`);
   } else if (p50srv > 200) {
     lines.push(`Verdict: RELAY looks slow (p50 server-time ${p50srv.toFixed(0)} ms).`);
@@ -621,8 +634,18 @@ let _netBacklogStreak = 0;
 let _netState = "ok";
 let _netForcedSevere = false;
 
-function _netRecord(duration, hadRecords, backlog) {
-  _netSamples.push({ duration, hadRecords, backlog });
+// `bytes` is the response/request body size we trust as small-payload.
+// Big batches (Claude finishing a long response) are bandwidth-limited
+// not latency-limited — their slowness is "data arrived, just took a
+// while to download," which is normal on a slow link and shouldn't
+// trip a "your network is slow" banner. Samples over NET_TRUSTED_BYTES
+// are kept for backlog accounting but excluded from duration triggers.
+const NET_TRUSTED_BYTES = 8 * 1024;
+function _netRecord(duration, hadRecords, backlog, bytes) {
+  _netSamples.push({
+    duration, hadRecords, backlog,
+    bytes: typeof bytes === "number" ? bytes : 0,
+  });
   if (_netSamples.length > NET_WINDOW) _netSamples.shift();
   _netBacklogStreak = backlog >= NET_BACKLOG_THRESH ? _netBacklogStreak + 1 : 0;
   _netForcedSevere = false;
@@ -671,20 +694,17 @@ function _netInflightEnd() {
 function _netEvaluate() {
   if (!navigator.onLine || _netForcedSevere) return "severe";
   if (_netInflightSlow) return "slow";
-  const withRecs = _netSamples.filter(s => s.hadRecords);
-  // Single-sample trigger — needed for fast feedback on the first slow
-  // input POST. The user just typed Enter; if that round-trip took 2s,
-  // we want the banner up immediately, not after three more samples.
-  // Auto-clears as soon as the next sample comes in fast.
-  const last = withRecs[withRecs.length - 1];
+  // Trusted = small-payload samples whose duration reflects round-trip
+  // time, not download bandwidth.
+  const trusted = _netSamples.filter(s =>
+    s.hadRecords && s.bytes <= NET_TRUSTED_BYTES);
+  const last = trusted[trusted.length - 1];
   if (last) {
     if (last.duration >= NET_SEVERE_DURATION_MS) return "severe";
     if (last.duration >= NET_SLOW_DURATION_MS) return "slow";
   }
-  // Rolling-mean backstop — catches the case where each sample is below
-  // the single-shot threshold but the link is consistently mediocre.
-  if (withRecs.length >= 3) {
-    const mean = withRecs.reduce((a, s) => a + s.duration, 0) / withRecs.length;
+  if (trusted.length >= 3) {
+    const mean = trusted.reduce((a, s) => a + s.duration, 0) / trusted.length;
     if (mean >= NET_SEVERE_DURATION_MS) return "severe";
     if (mean >= NET_SLOW_DURATION_MS) return "slow";
   }
@@ -1142,7 +1162,13 @@ async function pollLoop(sid) {
       }
       outNextSeq = next;
       if (!_netCatchupSample) {
-        _netRecord(_netDuration, records.length > 0, Math.max(0, total - next));
+        // Sum of decrypted plaintext is a close-enough proxy for response
+        // body size — the actual wire payload is plaintext + ~28 bytes of
+        // AES-GCM nonce+tag per record + base64 overhead, all dominated
+        // by plaintext for any record big enough to matter here.
+        let _netBytes = 0;
+        for (const c of chunks) _netBytes += c.length;
+        _netRecord(_netDuration, records.length > 0, Math.max(0, total - next), _netBytes);
       }
     } catch (e) {
       if (pollAbort.signal.aborted) return;

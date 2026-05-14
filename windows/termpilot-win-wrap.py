@@ -31,6 +31,7 @@ import base64
 import hashlib
 import shutil
 import http.client
+import io
 import json
 import os
 import queue
@@ -472,35 +473,91 @@ class Relay:
     MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 
     def __init__(self, base: str, secret: str, insecure: bool = False):
+        from urllib.parse import urlparse
         self.base = base.rstrip("?")
         self.secret = secret
+        self.insecure = insecure
         self.ctx = (
             ssl._create_unverified_context() if insecure
             else ssl.create_default_context()
         )
-        self._opener = urllib.request.build_opener(
-            urllib.request.HTTPSHandler(context=self.ctx)
-        )
+        u = urlparse(self.base)
+        if not u.hostname:
+            raise ValueError(f"relay URL has no host: {base!r}")
+        self.scheme = u.scheme or "https"
+        self.host = u.hostname
+        self.port = u.port or (443 if self.scheme == "https" else 80)
+        self.path = u.path or "/"
+        # Per-thread persistent connection so requests reuse TLS — see
+        # linux/termpilot-wrap's Relay class for the rationale.
+        self._tls = threading.local()
 
-    def _url(self, op, **params):
-        from urllib.parse import urlencode
-        q = {"op": op, **{k: str(v) for k, v in params.items() if v is not None}}
-        sep = "&" if "?" in self.base else "?"
-        return f"{self.base}{sep}{urlencode(q)}"
+    def _new_conn(self, timeout):
+        if self.scheme == "https":
+            return http.client.HTTPSConnection(self.host, self.port,
+                                               context=self.ctx, timeout=timeout)
+        return http.client.HTTPConnection(self.host, self.port, timeout=timeout)
+
+    def _get_conn(self, timeout):
+        c = getattr(self._tls, "conn", None)
+        if c is None:
+            c = self._new_conn(timeout)
+            self._tls.conn = c
+        else:
+            c.timeout = timeout
+        return c
+
+    def _drop_conn(self):
+        c = getattr(self._tls, "conn", None)
+        if c is not None:
+            try: c.close()
+            except Exception: pass
+        self._tls.conn = None
 
     def request(self, method: str, op: str, *, params=None, body=None, timeout=30.0):
-        url = self._url(op, **(params or {}))
+        from urllib.parse import urlencode
+        q = {"op": op, **{k: str(v) for k, v in (params or {}).items() if v is not None}}
+        sep = "&" if "?" in self.path else "?"
+        path = f"{self.path}{sep}{urlencode(q)}"
+
         data = json.dumps(body).encode() if body is not None else None
-        req = urllib.request.Request(url, data=data, method=method)
+        headers = {"Connection": "keep-alive", "Accept": "application/json"}
         if self.secret:
-            req.add_header("Authorization", f"Bearer {self.secret}")
+            headers["Authorization"] = f"Bearer {self.secret}"
         if data is not None:
-            req.add_header("Content-Type", "application/json")
-        with self._opener.open(req, timeout=timeout) as r:
-            raw = r.read(self.MAX_RESPONSE_BYTES + 1)
-            if len(raw) > self.MAX_RESPONSE_BYTES:
-                raise RuntimeError(f"relay response > {self.MAX_RESPONSE_BYTES} bytes")
-            return json.loads(raw.decode("utf-8"))
+            headers["Content-Type"] = "application/json"
+
+        last_stale = None
+        for attempt in range(2):
+            conn = self._get_conn(timeout)
+            try:
+                conn.request(method, path, body=data, headers=headers)
+                r = conn.getresponse()
+                raw = r.read(self.MAX_RESPONSE_BYTES + 1)
+                if len(raw) > self.MAX_RESPONSE_BYTES:
+                    self._drop_conn()
+                    raise RuntimeError(f"relay response > {self.MAX_RESPONSE_BYTES} bytes")
+                if r.status >= 400:
+                    raise urllib.error.HTTPError(
+                        f"{self.scheme}://{self.host}{path}",
+                        r.status, r.reason, r.msg, io.BytesIO(raw),
+                    )
+                return json.loads(raw.decode("utf-8"))
+            except urllib.error.HTTPError:
+                raise
+            except (http.client.RemoteDisconnected,
+                    ConnectionResetError, BrokenPipeError,
+                    http.client.BadStatusLine,
+                    http.client.CannotSendRequest) as e:
+                self._drop_conn()
+                last_stale = e
+                if attempt == 1:
+                    raise
+                continue
+            except Exception:
+                self._drop_conn()
+                raise
+        raise last_stale if last_stale else RuntimeError("relay.request: unreachable")
 
 
 # ---------------------------------------------------------------------------

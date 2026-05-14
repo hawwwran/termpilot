@@ -37,6 +37,11 @@ RewriteRule ^logs(/.*)?$ - [F,L]
 <IfModule mod_headers.c>
     Header set X-Accel-Buffering "no"
 </IfModule>
+# Note on HTTP/2: this host already serves it (verified via TLS ALPN with
+# curl --http2). Browser fetch() negotiates HTTP/2 automatically. The
+# Python wrappers stay on HTTP/1.1 with keep-alive because urllib has no
+# HTTP/2 support. Don't add `Protocols h2 http/1.1` here — that directive
+# isn't legal in .htaccess context and would 500 every request.
 
 # Security headers. The page holds device tokens in localStorage so any
 # XSS sink is an immediate token-exfiltration vector — a strict CSP is

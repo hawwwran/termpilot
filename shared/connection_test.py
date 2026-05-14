@@ -23,18 +23,37 @@ def _normalize_base(base_url: str) -> str:
     return s
 
 
-def _probe(base: str, op: str, *, secret: str, insecure: bool, timeout: float = 15.0):
-    """One probe. Returns (wall_ms, server_ms, body_dict)."""
-    url = f"{base}{_DEBUG_PATH}?op={op}"
+def _make_session(base: str, *, insecure: bool):
+    """Return a single http.client connection we can reuse across probes,
+    so we measure relay round-trip time, not TLS handshake cost. urllib's
+    opener does NOT pool — it spins up a fresh connection per .open(),
+    which adds ~2 RTT of TLS handshake to every probe and masks the
+    relay's real behavior."""
+    import http.client
+    from urllib.parse import urlparse
+    u = urlparse(base)
     ctx = ssl._create_unverified_context() if insecure else ssl.create_default_context()
-    req = urllib.request.Request(url, method="GET")
+    port = u.port or (443 if u.scheme == "https" else 80)
+    if u.scheme == "https":
+        conn = http.client.HTTPSConnection(u.hostname, port, context=ctx, timeout=15.0)
+    else:
+        conn = http.client.HTTPConnection(u.hostname, port, timeout=15.0)
+    return conn, u.path.rstrip("/")
+
+
+def _probe(conn, path: str, op: str, *, secret: str):
+    """One probe over a reused connection. Returns (wall_ms, server_ms, body_dict)."""
+    headers = {"Connection": "keep-alive"}
     if secret:
-        req.add_header("Authorization", f"Bearer {secret}")
-    opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx))
+        headers["Authorization"] = f"Bearer {secret}"
+    full_path = f"{path}{_DEBUG_PATH}?op={op}"
     t0 = time.perf_counter()
-    with opener.open(req, timeout=timeout) as r:
-        raw = r.read(64 * 1024)
+    conn.request("GET", full_path, headers=headers)
+    r = conn.getresponse()
+    raw = r.read()
     wall_ms = (time.perf_counter() - t0) * 1000.0
+    if r.status != 200:
+        raise urllib.error.HTTPError(full_path, r.status, r.reason, dict(r.getheaders()), None)
     body = json.loads(raw.decode("utf-8"))
     return wall_ms, float(body.get("server_ms") or 0.0), body
 
@@ -70,9 +89,17 @@ def run(base_url: str, secret: str, *,
 
     sys.stdout.write(f"Testing {base}{_DEBUG_PATH} …\n\n")
 
-    # First probe also surfaces auth / deploy errors cleanly.
     try:
-        wall, srv, _ = _probe(base, "ping", secret=secret, insecure=insecure)
+        conn, path = _make_session(base, insecure=insecure)
+    except Exception as e:
+        sys.stderr.write(f"ERROR: cannot reach relay — {e}\n")
+        return 1
+
+    # First probe also surfaces auth / deploy errors cleanly. We also
+    # treat it as the TLS-handshake warm-up so subsequent probes measure
+    # the steady-state RTT (with keep-alive).
+    try:
+        wall, srv, _ = _probe(conn, path, "ping", secret=secret)
     except urllib.error.HTTPError as e:
         sys.stderr.write(f"ERROR: HTTP {e.code} from debug.php — {e.reason}\n")
         if e.code == 401:
@@ -81,40 +108,51 @@ def run(base_url: str, secret: str, *,
         elif e.code == 404:
             sys.stderr.write("  Hint: debug.php not deployed on this relay yet.\n")
         return 1
-    except urllib.error.URLError as e:
-        sys.stderr.write(f"ERROR: cannot reach relay — {e.reason}\n")
-        return 1
     except Exception as e:
-        sys.stderr.write(f"ERROR: unexpected — {e}\n")
+        sys.stderr.write(f"ERROR: cannot reach relay — {e}\n")
         return 1
 
-    ping_wall = [wall]
-    ping_server = [srv]
-    for _ in range(max(0, ping_count - 1)):
+    ping_wall = []  # exclude warm-up so handshake doesn't skew the report
+    ping_server = []
+    for _ in range(max(0, ping_count)):
         try:
-            w, s, _ = _probe(base, "ping", secret=secret, insecure=insecure)
+            w, s, _ = _probe(conn, path, "ping", secret=secret)
             ping_wall.append(w)
             ping_server.append(s)
         except Exception as e:
             sys.stderr.write(f"  (ping failed: {e})\n")
+            try:
+                conn.close()
+                conn, path = _make_session(base, insecure=insecure)
+            except Exception:
+                pass
 
     fs_wall, fs_server = [], []
     fs_sub = {}
     for _ in range(max(0, fs_count)):
         try:
-            w, s, body = _probe(base, "fs", secret=secret, insecure=insecure)
+            w, s, body = _probe(conn, path, "fs", secret=secret)
             fs_wall.append(w)
             fs_server.append(s)
             for k, v in (body.get("timings_ms") or {}).items():
                 fs_sub.setdefault(k, []).append(float(v))
         except Exception as e:
             sys.stderr.write(f"  (fs probe failed: {e})\n")
+            try:
+                conn.close()
+                conn, path = _make_session(base, insecure=insecure)
+            except Exception:
+                pass
 
     # Try to grab info block once for context.
     info = None
     try:
-        _, _, body = _probe(base, "info", secret=secret, insecure=insecure)
+        _, _, body = _probe(conn, path, "info", secret=secret)
         info = body.get("info")
+    except Exception:
+        pass
+    try:
+        conn.close()
     except Exception:
         pass
 
@@ -140,9 +178,25 @@ def run(base_url: str, secret: str, *,
     sys.stdout.write("\n")
     net_stats = _stats(network)
     srv_stats = _stats(ping_server)
+    wall_stats = _stats(ping_wall)
     p50_net = net_stats["p50"] if net_stats else 0
+    p95_net = net_stats["p95"] if net_stats else 0
     p50_srv = srv_stats["p50"] if srv_stats else 0
-    if p50_net > 500:
+    p50_wall = wall_stats["p50"] if wall_stats else 0
+    p95_wall = wall_stats["p95"] if wall_stats else 0
+    # Queueing signature: p95 wall is much larger than p50 wall while
+    # server-time stays low. That means PHP itself was fast on every
+    # probe, but at least one request sat in the FastCGI gateway queue
+    # for seconds before a worker freed up. On shared hosting this
+    # typically means pm.max_children is exhausted by long-polls.
+    if p95_wall > 1000 and p95_wall > p50_wall * 5 and p50_srv < 50:
+        sys.stdout.write(
+            f"Verdict: RELAY QUEUEING (p50 {p50_wall:.0f} ms, p95 {p95_wall:.0f} ms wall; "
+            f"server-time stays at {p50_srv:.1f} ms).\n"
+            "  PHP-FPM workers look exhausted — most likely the long-polls from active\n"
+            "  sessions are tying up the pool. Either reduce LONG_POLL_SECS in relay.php\n"
+            "  or ask the host to raise pm.max_children.\n")
+    elif p50_net > 500:
         sys.stdout.write(
             f"Verdict: NETWORK looks slow (p50 RTT-overhead {p50_net:.0f} ms). "
             "The relay is replying quickly; the time is spent over the wire.\n")
