@@ -716,31 +716,213 @@ function _netRefreshBanner() {
   _setNetBanner(_netEvaluate());
 }
 
+// Drive the top-right colored disc. Replaces the older banner; the
+// state-machine is the same (ok / slow / severe), the surface is just
+// less intrusive. Title + aria-label carry the human-readable reason so
+// hover / screen-reader users still get it.
 function _setNetBanner(state) {
   if (state === _netState) return;
   _netState = state;
-  const el = document.getElementById("termpilot-net-banner");
-  const msg = document.getElementById("termpilot-net-banner-msg");
-  if (!el || !msg) return;
-  if (state === "ok") {
-    el.hidden = true;
-    el.classList.remove("severe");
-    return;
-  }
+  const el = document.getElementById("termpilot-net-disc");
+  if (!el) return;
+  el.dataset.state = state;
+  let label;
   if (state === "severe") {
-    el.classList.add("severe");
-    msg.textContent = navigator.onLine
-      ? "Connection very slow — terminal may be far behind."
-      : "Offline — waiting for connection.";
+    label = navigator.onLine
+      ? "Connection very slow — click for details"
+      : "Offline — waiting for connection";
+  } else if (state === "slow") {
+    label = "Slow network — click for details";
   } else {
-    el.classList.remove("severe");
-    msg.textContent = "Slow network — terminal may lag behind.";
+    label = "Connection OK — click for details";
   }
-  el.hidden = false;
+  el.title = label;
+  el.setAttribute("aria-label", label);
 }
 
 window.addEventListener("online", _netRefreshBanner);
 window.addEventListener("offline", _netRefreshBanner);
+
+document.addEventListener("click", (e) => {
+  if (e.target.closest("#termpilot-net-disc")) openNetqModal();
+});
+
+function _fmtMs(v) {
+  if (!isFinite(v) || v <= 0) return "—";
+  return v >= 100 ? `${v.toFixed(0)} ms` : `${v.toFixed(1)} ms`;
+}
+
+function _summarizeSamples() {
+  // Single pass over the ring buffer for the modal stats. Returns
+  // categorized counts/percentiles so the modal layout stays trivial.
+  const all = _netSamples;
+  const trusted = all.filter(s => s.hadRecords && s.bytes <= NET_TRUSTED_BYTES);
+  const big = all.filter(s => s.hadRecords && s.bytes > NET_TRUSTED_BYTES);
+  const empty = all.filter(s => !s.hadRecords);
+  const pct = (arr, p) => {
+    if (!arr.length) return NaN;
+    const s = [...arr].sort((a, b) => a - b);
+    return s[Math.max(0, Math.round(s.length * p) - 1)];
+  };
+  const durs = trusted.map(s => s.duration);
+  return {
+    state: _netState,
+    online: navigator.onLine,
+    inflightSlow: _netInflightSlow,
+    backlogStreak: _netBacklogStreak,
+    samples: all.length,
+    trustedCount: trusted.length,
+    bigCount: big.length,
+    emptyCount: empty.length,
+    p50: pct(durs, 0.5),
+    p95: pct(durs, 0.95),
+    max: durs.length ? Math.max(...durs) : NaN,
+    lastBacklog: all.length ? all[all.length - 1].backlog : 0,
+  };
+}
+
+function _netqStatsView() {
+  const s = _summarizeSamples();
+  const stateLabel = s.state === "severe"
+    ? (s.online ? "Very slow" : "Offline")
+    : s.state === "slow" ? "Slow" : "OK";
+  return `
+    <div class="modal netq-modal" role="dialog" aria-modal="true">
+      <div class="netq-head">
+        <h2>Connection quality</h2>
+        <button type="button" class="netq-info" id="netq-info"
+                title="What do these values mean?" aria-label="What do these values mean?">
+          <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"/>
+            <line x1="12" y1="16" x2="12" y2="12"/>
+            <line x1="12" y1="8" x2="12.01" y2="8"/>
+          </svg>
+        </button>
+      </div>
+      <p class="netq-state-line">
+        <span class="netq-state-dot ${escapeHtml(s.state)}"></span>
+        <strong>${escapeHtml(stateLabel)}</strong>
+      </p>
+      <dl class="netq-stats">
+        <dt>online</dt><dd>${s.online ? "yes" : "no"}</dd>
+        <dt>recent polls</dt><dd>${s.samples}</dd>
+        <dt>small-payload</dt><dd>${s.trustedCount}</dd>
+        <dt>big batches</dt><dd>${s.bigCount}</dd>
+        <dt>empty (idle)</dt><dd>${s.emptyCount}</dd>
+        <dt>p50 latency</dt><dd>${escapeHtml(_fmtMs(s.p50))}</dd>
+        <dt>p95 latency</dt><dd>${escapeHtml(_fmtMs(s.p95))}</dd>
+        <dt>max latency</dt><dd>${escapeHtml(_fmtMs(s.max))}</dd>
+        <dt>backlog (last)</dt><dd>${s.lastBacklog} records</dd>
+        <dt>backlog streak</dt><dd>${s.backlogStreak}</dd>
+        <dt>POST inflight</dt><dd>${s.inflightSlow ? "slow" : "no"}</dd>
+      </dl>
+      <div class="row actions">
+        <button id="netq-test">Run full test</button>
+        <button id="netq-close">close</button>
+      </div>
+      <pre id="netq-result" class="diag-out" hidden></pre>
+    </div>`;
+}
+
+function _netqHelpView() {
+  return `
+    <div class="modal netq-modal" role="dialog" aria-modal="true">
+      <div class="netq-head">
+        <h2>What these values mean</h2>
+      </div>
+      <div class="netq-help">
+        <h3>state</h3>
+        <p>The current judgment: <code>OK</code>, <code>Slow</code>, or
+        <code>Very Slow / Offline</code>. Derived from the metrics below
+        over a rolling window of the last 6 samples.</p>
+
+        <h3>online</h3>
+        <p>What the device's network stack reports — whether the OS thinks
+        there's any connection at all.</p>
+
+        <h3>recent polls</h3>
+        <p>Total samples in the window. One sample per output poll from
+        the relay, whether or not the poll returned data.</p>
+
+        <h3>small-payload / big batches / empty</h3>
+        <p>How those samples break down. <strong>Small-payload</strong>
+        responses (≤ ${NET_TRUSTED_BYTES / 1024} KB) finish so quickly that
+        their wall-time really is round-trip time. <strong>Big batches</strong>
+        carry a lot of data — Claude's final response chunk, say — and are
+        bandwidth-limited, not latency-limited; including them would flag
+        every long answer as "slow connection." <strong>Empty</strong> polls
+        happened when the relay had nothing new (idle wait), so they tell
+        us nothing about quality.</p>
+
+        <h3>p50 / p95 / max latency</h3>
+        <p>Percentiles over the small-payload samples only.
+        <strong>p50</strong> is the median — half the requests were faster,
+        half slower. <strong>p95</strong> is the 95th percentile — 95% of
+        requests beat this, 5% were worse; it's the "tail" that shows
+        what occasional bad samples look like. <strong>max</strong> is the
+        single worst sample in the window.</p>
+
+        <h3>backlog (last) / backlog streak</h3>
+        <p>After the most recent poll, how many records the relay still
+        had queued for us. &gt; 0 means we're downloading slower than the
+        wrapper is producing. <strong>Streak</strong> is how many polls in
+        a row have shown backlog. A streak of 3 trips the disc to slow
+        even if latency looks fine — that's the producer outrunning us.</p>
+
+        <h3>POST inflight</h3>
+        <p>Shows <code>slow</code> while the most recent input POST (a
+        keystroke you sent) has been waiting longer than 1.5 s. Clears as
+        soon as the POST returns. This is what lets the disc go yellow
+        <em>while</em> a slow request is happening, instead of only after
+        it finishes.</p>
+      </div>
+      <div class="row actions">
+        <button id="netq-back">← back</button>
+        <button id="netq-close">close</button>
+      </div>
+    </div>`;
+}
+
+function openNetqModal() {
+  if (document.querySelector(".modal-backdrop")) return;
+  const back = document.createElement("div");
+  back.className = "modal-backdrop";
+  document.body.appendChild(back);
+
+  const renderView = (which) => {
+    back.innerHTML = which === "help" ? _netqHelpView() : _netqStatsView();
+    wireHandlers();
+  };
+
+  const wireHandlers = () => {
+    const $ = sel => back.querySelector(sel);
+    const close = $("#netq-close");
+    if (close) close.addEventListener("click", () => back.remove());
+    const info = $("#netq-info");
+    if (info) info.addEventListener("click", () => renderView("help"));
+    const backBtn = $("#netq-back");
+    if (backBtn) backBtn.addEventListener("click", () => renderView("stats"));
+    const test = $("#netq-test");
+    if (test) test.addEventListener("click", async () => {
+      const out = $("#netq-result");
+      test.disabled = true;
+      out.hidden = false;
+      out.textContent = "Running probes…";
+      try {
+        out.textContent = await runConnectionDiagnostic(TPSession.loadSecret());
+      } catch (e) {
+        out.textContent = "Failed: " + (e && e.message || e);
+      } finally {
+        test.disabled = false;
+      }
+    });
+  };
+
+  back.addEventListener("click", (e) => {
+    if (e.target === back) back.remove();  // backdrop click dismisses
+  });
+  renderView("stats");
+}
 
 function renderSessions(groups, orphans) {
   const host = document.getElementById("sessions-host");

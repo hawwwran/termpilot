@@ -21,9 +21,6 @@
   <span>A new version is available.</span>
   <button type="button" id="termpilot-update-btn">UPDATE</button>
 </div>
-<div class="termpilot-net-banner" id="termpilot-net-banner" hidden role="status" aria-live="polite">
-  <span id="termpilot-net-banner-msg">Slow network — terminal may lag behind.</span>
-</div>
 <header>
   <button class="icon desktop-only" id="toggle-aside" title="Toggle sessions panel" aria-label="Toggle sessions panel">☰</button>
   <h1>TermPilot</h1>
@@ -54,6 +51,9 @@
           <span class="sb-started" id="sb-started"></span>
         </div>
       </div>
+      <button type="button" class="termpilot-net-disc" id="termpilot-net-disc"
+              data-state="ok" title="Connection quality — click for details"
+              aria-label="Connection quality"></button>
     </div>
     <div id="empty-hero" class="empty-hero" hidden>
       <div class="hero-card">

@@ -221,10 +221,40 @@ button:hover { background:#262c3a; }
 .termpilot-update-banner button:hover:not(:disabled) { background:#1a1d24; }
 .termpilot-update-banner button:disabled { opacity:0.7; cursor:wait; }
 
-/* ==== Slow-network banner ==== */
-.termpilot-net-banner { flex:0 0 auto; background:#e6c84a; color:#0d0f12; display:flex; align-items:center; justify-content:center; gap:14px; padding:6px 16px; font-size:12px; font-weight:600; box-shadow:0 2px 6px rgba(0,0,0,0.35); }
-.termpilot-net-banner[hidden] { display:none; }
-.termpilot-net-banner.severe { background:#d95757; color:#fff; }
+/* ==== Connection-quality disc ====
+   Lives inside the session-bar (which is hidden when no session is
+   selected, so the disc disappears with it). Vertically centered to the
+   bar's full height regardless of how many lines of metadata it shows.
+   Three states: ok (green), slow (yellow), severe (orange). Pulses on
+   severe. */
+.termpilot-net-disc { flex:0 0 14px; align-self:center; margin-left:auto; width:14px; height:14px; border-radius:50%; border:none; padding:0; background:#3ed27a; box-shadow:0 0 0 2px rgba(0,0,0,0.35), 0 0 6px rgba(62,210,122,0.6); cursor:pointer; transition: background-color 200ms, box-shadow 200ms; }
+.termpilot-net-disc[data-state="slow"] { background:#e6c84a; box-shadow:0 0 0 2px rgba(0,0,0,0.35), 0 0 8px rgba(230,200,74,0.8); }
+.termpilot-net-disc[data-state="severe"] { background:#e08a3c; box-shadow:0 0 0 2px rgba(0,0,0,0.35), 0 0 10px rgba(224,138,60,0.95); animation: termpilot-disc-pulse 1.2s ease-in-out infinite alternate; }
+.termpilot-net-disc:focus-visible { outline:2px solid #a8c0ff; outline-offset:2px; }
+#session-bar.empty-state .termpilot-net-disc { display:none; }
+@keyframes termpilot-disc-pulse { from { transform: scale(1); } to { transform: scale(1.18); } }
+
+/* ==== Connection-quality modal ==== */
+.netq-modal { max-width:460px; }
+.netq-head { display:flex; align-items:center; gap:10px; margin:0 0 12px; }
+.netq-head h2 { margin:0; flex:1; }
+.netq-info { flex:0 0 24px; width:24px; height:24px; box-sizing:border-box; padding:0; display:inline-flex; align-items:center; justify-content:center; border:none; background:transparent; color:#8a92a0; cursor:pointer; border-radius:50%; }
+.netq-info svg { width:20px; height:20px; display:block; }
+.netq-info:hover { color:#a8c0ff; }
+.netq-info:focus-visible { outline:2px solid #a8c0ff; outline-offset:2px; }
+.netq-state-line { display:flex; align-items:center; gap:10px; margin:0 0 14px; font-size:13px; }
+.netq-state-dot { width:12px; height:12px; border-radius:50%; flex:0 0 12px; }
+.netq-state-dot.ok { background:#3ed27a; }
+.netq-state-dot.slow { background:#e6c84a; }
+.netq-state-dot.severe { background:#e08a3c; }
+.netq-stats { display:grid; grid-template-columns:auto 1fr; gap:4px 12px; font-size:12px; font-family: ui-monospace, Menlo, Consolas, monospace; background:#0d0f12; border:1px solid #2a2f3a; border-radius:6px; padding:10px 12px; margin:0 0 14px; }
+.netq-stats dt { color:#8a92a0; }
+.netq-stats dd { color:#dbe5ff; margin:0; }
+.netq-help { font-size:12px; line-height:1.55; color:#dbe5ff; max-height:50vh; overflow-y:auto; padding-right:4px; }
+.netq-help h3 { font-size:12px; margin:14px 0 4px; color:#a8c0ff; text-transform:uppercase; letter-spacing:.05em; }
+.netq-help h3:first-child { margin-top:0; }
+.netq-help p { margin:0 0 6px; }
+.netq-help code { background:#0d0f12; border:1px solid #2a2f3a; padding:0 4px; border-radius:3px; font-size:11px; }
 
 /* Diagnostics output in the settings modal */
 .diag-out { margin:8px 0 0; padding:8px 10px; background:#0d0f12; border:1px solid #2a2f3a; border-radius:6px; color:#dbe5ff; font-family: ui-monospace, Menlo, Consolas, monospace; font-size:11px; line-height:1.45; white-space:pre-wrap; word-break:break-word; max-height:320px; overflow:auto; }
@@ -242,8 +272,7 @@ button:hover { background:#262c3a; }
   main.collapsed { grid-template-columns:1fr; }
   .mobile-only { display:inline-flex; align-items:center; justify-content:center; }
   .desktop-only { display:none; }
-  .session-bar { padding:6px 8px; gap:8px; align-items:flex-start; padding-right:80px; position:relative; }
-  .session-bar a.switch { position:absolute; right:8px; top:6px; padding:4px 8px; font-size:11px; }
+  .session-bar { padding:6px 8px; gap:8px; align-items:flex-start; }
   .ctrl { display:none; }
   main.show-ctrl .ctrl { display:flex; }
 }
