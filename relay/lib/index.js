@@ -43,6 +43,177 @@ backBtn.addEventListener("click", () => {
 mobileMQ.addEventListener("change", applyLayout);
 applyLayout();
 
+/* ===== Theme ===========================================================
+ * The relay app renders the terminal as a <pre id="log"> with synthetic
+ * <span style="…"> cells driven by the ANSI16 array (declared further
+ * down). Theming therefore needs to do three things on switch:
+ *
+ *   1) Rewrite ANSI16's contents in place — cellStyle() reads each
+ *      colour by index per-render, so a future scheduleLogRender() will
+ *      pick up the new palette automatically.
+ *   2) Write per-theme CSS custom properties on :root so the rest of
+ *      the chrome (defined in index.css using var(--tp-…)) re-tints.
+ *   3) Update document.documentElement.style.colorScheme so the browser
+ *      renders scrollbars / native form controls in matching mode.
+ *
+ * Defaults: with no stored preference the picker follows the OS
+ * prefers-color-scheme. Manual selections win and persist. Theme data
+ * (window.TPThemes) is loaded by lib/themes.js. If that file is
+ * missing for any reason, this module degrades to a no-op and the
+ * CSS-var defaults declared in index.css render the app as before.
+ */
+const THEME_KEY = "termpilot-theme";
+
+function _hexToRgb(s) {
+  const h = (s || "").replace("#", "");
+  const n = parseInt(h.length === 3
+    ? h.split("").map(c => c + c).join("")
+    : h, 16);
+  return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+}
+function _rgbToHex(r, g, b) {
+  const c = v => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, "0");
+  return "#" + c(r) + c(g) + c(b);
+}
+// Linear sRGB interpolation. `ratio` is the share of `b`; 0 returns
+// `a`, 1 returns `b`. Used to derive chrome surfaces and borders from
+// the theme's bg/fg/palette without depending on color-mix() (which
+// only ships in Safari ≥ 16.4).
+function _mix(a, b, ratio) {
+  const A = _hexToRgb(a), B = _hexToRgb(b);
+  return _rgbToHex(
+    A.r + (B.r - A.r) * ratio,
+    A.g + (B.g - A.g) * ratio,
+    A.b + (B.b - A.b) * ratio,
+  );
+}
+function _palOr(theme, i, fallback) {
+  return (theme.palette && theme.palette[i]) || fallback;
+}
+
+function loadThemePref() {
+  try { return localStorage.getItem(THEME_KEY) || "system"; }
+  catch (e) { return "system"; }
+}
+function saveThemePref(v) {
+  try {
+    if (!v || v === "system") localStorage.removeItem(THEME_KEY);
+    else localStorage.setItem(THEME_KEY, v);
+  } catch (e) {}
+}
+function findTheme(id) {
+  const T = (window.TPThemes && window.TPThemes.THEMES) || [];
+  return T.find(t => t.id === id) || null;
+}
+function resolveTheme(pref) {
+  const TP = window.TPThemes;
+  if (!TP) return null;
+  if (pref === "system" || !pref) {
+    const dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+    return findTheme(dark ? TP.DEFAULT_DARK_ID : TP.DEFAULT_LIGHT_ID)
+        || (TP.THEMES && TP.THEMES[0]) || null;
+  }
+  return findTheme(pref) || findTheme(TP.DEFAULT_DARK_ID)
+      || (TP.THEMES && TP.THEMES[0]) || null;
+}
+
+function applyTheme(theme) {
+  if (!theme) return;  // no themes bundle, fall back to CSS defaults
+  const root = document.documentElement;
+  const bg = theme.bg, fg = theme.fg, p = theme.palette || [];
+
+  // Bright ANSI variants (palette 8–15) for semantic accents, with the
+  // normal variants (1–6) as fallback if a theme has unusual palette
+  // shape. ANSI: 1=red 2=green 3=yellow 4=blue 9=br.red 10=br.green
+  //              11=br.yellow 12=br.blue.
+  const accent  = _palOr(theme, 12, _palOr(theme, 4, "#a8c0ff"));
+  const accentS = _palOr(theme, 4,  _palOr(theme, 12, "#3d5afe"));
+  const success = _palOr(theme, 10, _palOr(theme, 2, "#3ed27a"));
+  const warn    = _palOr(theme, 11, _palOr(theme, 3, "#f5a524"));
+  const error   = _palOr(theme, 9,  _palOr(theme, 1, "#e5484d"));
+
+  const set = (k, v) => root.style.setProperty(k, v);
+
+  // Surfaces
+  set("--tp-bg", bg);
+  set("--tp-bg-elev",         _mix(bg, fg, 0.06));
+  set("--tp-bg-elev2",        _mix(bg, fg, 0.03));
+  set("--tp-bg-sunken",       _mix(bg, fg, 0.10));
+  set("--tp-bg-selected",     _mix(bg, accent, 0.18));
+  set("--tp-bg-selected-strong", _mix(bg, accent, 0.32));
+  set("--tp-bg-hover",        _mix(bg, fg, 0.13));
+  set("--tp-bg-hover2",       _mix(bg, fg, 0.08));
+  set("--tp-bg-key",          _mix(bg, fg, 0.05));
+
+  // Text tiers
+  set("--tp-fg", fg);
+  set("--tp-fg-muted",   _mix(fg, bg, 0.30));
+  set("--tp-fg-meta",    _mix(fg, bg, 0.40));
+  set("--tp-fg-dim",     _mix(accent, bg, 0.30));
+  set("--tp-fg-faint",   _mix(fg, bg, 0.55));
+  set("--tp-fg-empty",   _mix(fg, bg, 0.50));
+  set("--tp-fg-aside-sub", _mix(fg, bg, 0.50));
+
+  // Borders
+  set("--tp-border",        _mix(bg, fg, 0.10));
+  set("--tp-border-strong", _mix(bg, fg, 0.20));
+  set("--tp-border-soft",   _mix(bg, fg, 0.06));
+
+  // Accent family
+  set("--tp-accent", accent);
+  set("--tp-accent-strong", accentS);
+  set("--tp-accent-fg", _mix(fg, accent, 0.25));
+  set("--tp-accent-meta", _mix(accent, fg, 0.30));
+
+  // Semantic
+  set("--tp-success", success);
+  set("--tp-warn", warn);
+  set("--tp-warn-bg",      _mix(bg, warn, 0.22));
+  set("--tp-warn-bg-soft", _mix(bg, warn, 0.08));
+  set("--tp-warn-border",  _mix(bg, warn, 0.45));
+  set("--tp-warn-hover",   _mix(bg, warn, 0.30));
+  set("--tp-error", error);
+
+  set("--tp-netq-slow", warn);
+  set("--tp-netq-severe", _mix(warn, error, 0.50));
+
+  set("--tp-update-bg",        _mix(bg, warn, 0.65));
+  set("--tp-update-fg",        bg);
+  set("--tp-update-btn-hover", _mix(bg, fg, 0.10));
+
+  root.style.colorScheme = theme.isLight ? "light" : "dark";
+
+  // Mutate the ANSI16 array contents in place. The const at line ~534
+  // binds the *array reference* — replacing its contents is legal, and
+  // cellStyle() reads ANSI16[n] per call so the next render picks up
+  // the new colours automatically. The try/catch is because applyTheme
+  // also runs at module load, before ANSI16 / scheduleLogRender are
+  // declared (Temporal Dead Zone); the post-declaration callsite below
+  // back-fills the first boot.
+  try {
+    if (p.length >= 16) {
+      ANSI16.length = 0;
+      for (let i = 0; i < 16; i++) ANSI16.push(p[i]);
+    }
+    scheduleLogRender();
+  } catch (e) {}
+}
+
+// Boot: resolve and apply before the placeholder term is created
+// (further down in this file), so first paint shows the right palette.
+applyTheme(resolveTheme(loadThemePref()));
+
+// Re-apply when the OS pref flips, but only if the user is in
+// "system" mode — a manual selection wins permanently.
+try {
+  window.matchMedia("(prefers-color-scheme: dark)").addEventListener(
+    "change",
+    () => { if (loadThemePref() === "system") applyTheme(resolveTheme("system")); },
+  );
+} catch (e) {
+  // Older Safari uses .addListener; not worth polyfilling for a nice-to-have.
+}
+
 /* ===== Token UI ======================================================= */
 function escapeHtml(s) { return String(s).replace(/[&<>"'/]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;","/":"&#x2F;"})[c]); }
 
@@ -244,6 +415,11 @@ function openTokenModal(opts = {}) {
         <button type="button" id="modal-test-conn">Test connection</button>
         <pre id="modal-test-result" class="diag-out" hidden></pre>
       </div>
+      <h2 style="margin-top:18px">Theme</h2>
+      <div class="row theme-row">
+        <span class="theme-current-name" id="modal-theme-current"></span>
+        <button type="button" id="modal-theme-pick">Change theme…</button>
+      </div>
       <div class="row actions">
         <button id="modal-close">${initial ? "save and continue" : "close"}</button>
       </div>
@@ -273,6 +449,27 @@ function openTokenModal(opts = {}) {
     TPSession.addToken(name || "device", hex.toLowerCase());
     back.remove(); openTokenModal({ initial });
   });
+  // Theme row — show current resolved theme name and open the picker
+  // on top of the settings modal (separate .theme-modal-backdrop so the
+  // existing backdrop guard does not block it).
+  (function _wireThemeRow() {
+    const nameEl = $("#modal-theme-current");
+    const btn = $("#modal-theme-pick");
+    function refresh() {
+      const pref = loadThemePref();
+      const resolved = resolveTheme(pref);
+      if (!resolved) {
+        nameEl.textContent = "(themes unavailable)";
+        btn.disabled = true;
+        return;
+      }
+      nameEl.textContent = (pref === "system")
+        ? `System default (${resolved.name})`
+        : resolved.name;
+    }
+    refresh();
+    btn.addEventListener("click", () => openThemePickerModal({ onChange: refresh }));
+  })();
   $("#modal-test-conn").addEventListener("click", async () => {
     // Probe the relay's debug.php so the user can tell whether perceived
     // slowness is transport (high wall, low server) or the relay itself.
@@ -326,6 +523,127 @@ function openTokenModal(opts = {}) {
         TPSession.removeToken(id);
         back.remove(); openTokenModal({ initial });
       }
+    });
+  });
+}
+
+/* ===== Theme picker modal ============================================
+ * Layered on top of the settings modal (z-index 101 vs 100). Uses a
+ * distinct .theme-modal-backdrop class so the settings modal's
+ * "only one .modal-backdrop at a time" guard does not block it.
+ *
+ * Layout: "Current" card at the top, separator, then a responsive
+ * grid containing the "System default" tile followed by every bundled
+ * theme. Cards are <button>s for free keyboard navigation. Clicking
+ * applies + persists immediately; no save affordance.
+ */
+function openThemePickerModal(opts = {}) {
+  if (document.querySelector(".theme-modal-backdrop")) return;
+  const onChange = opts.onChange || (() => {});
+  const TP = window.TPThemes;
+  if (!TP || !TP.THEMES || TP.THEMES.length === 0) {
+    alert("Theme bundle (lib/themes.js) is not loaded.");
+    return;
+  }
+
+  // 8 swatches sampled from the 16-colour palette: normal 1–6 plus
+  // bright 9 and 12. Gives a quick read of what code highlighting will
+  // look like without rendering all 16 dots per tile.
+  const DOT_INDICES = [1, 2, 3, 4, 5, 6, 9, 12];
+
+  function paletteDotsHtml(palette) {
+    return DOT_INDICES.map(i => {
+      const c = (palette && palette[i]) || "#000";
+      return `<span style="background:${escapeHtml(c)}"></span>`;
+    }).join("");
+  }
+  function cardHtml(theme, isActive) {
+    return `
+      <button class="theme-card" data-theme-id="${escapeHtml(theme.id)}" aria-pressed="${isActive ? "true" : "false"}" title="${escapeHtml(theme.name)}">
+        <div class="theme-preview" style="background:${escapeHtml(theme.bg)}; color:${escapeHtml(theme.fg)}">
+          <span class="theme-sample">Aa</span>
+          <div class="theme-palette">${paletteDotsHtml(theme.palette)}</div>
+        </div>
+        <div class="theme-name">${escapeHtml(theme.name)}</div>
+      </button>`;
+  }
+  function systemTileHtml(isActive) {
+    const darkT = findTheme(TP.DEFAULT_DARK_ID);
+    const lightT = findTheme(TP.DEFAULT_LIGHT_ID);
+    const lBg = (lightT && lightT.bg) || "#f4f4f4";
+    const lFg = (lightT && lightT.fg) || "#222";
+    const dBg = (darkT && darkT.bg) || "#282c34";
+    const dFg = (darkT && darkT.fg) || "#abb2bf";
+    return `
+      <button class="theme-card theme-card-system" data-theme-id="__system__" aria-pressed="${isActive ? "true" : "false"}" title="Follow system preference">
+        <div class="theme-preview theme-preview-system">
+          <div class="theme-half" style="background:${lBg}; color:${lFg}"><span class="theme-sample">Aa</span></div>
+          <div class="theme-half" style="background:${dBg}; color:${dFg}"><span class="theme-sample">Aa</span></div>
+        </div>
+        <div class="theme-name">System default</div>
+      </button>`;
+  }
+
+  const pref = loadThemePref();
+  const resolved = resolveTheme(pref);
+
+  const back = document.createElement("div");
+  back.className = "theme-modal-backdrop";
+  const currentHtml = (pref === "system")
+    ? systemTileHtml(true)
+    : (resolved ? cardHtml(resolved, true) : "");
+  const currentLabel = (pref === "system" && resolved)
+    ? `System default — currently ${escapeHtml(resolved.name)}`
+    : (resolved ? escapeHtml(resolved.name) : "(unknown)");
+
+  back.innerHTML = `
+    <div class="modal theme-modal" role="dialog" aria-modal="true" aria-label="Theme picker">
+      <h2>Theme</h2>
+      <p>Pick a colour theme. The terminal log uses the selected palette;
+         the rest of the app re-tints to match.</p>
+
+      <label>Current</label>
+      <div class="theme-current">
+        ${currentHtml}
+        <div class="theme-current-meta">${currentLabel}</div>
+      </div>
+
+      <div class="theme-sep"></div>
+
+      <label>All themes</label>
+      <div class="theme-grid">
+        ${systemTileHtml(pref === "system")}
+        ${TP.THEMES.map(t => cardHtml(t, pref !== "system" && t.id === (resolved && resolved.id))).join("")}
+      </div>
+
+      <div class="row actions">
+        <button id="theme-close">close</button>
+      </div>
+    </div>`;
+  document.body.appendChild(back);
+
+  back.addEventListener("click", (e) => {
+    if (e.target === back) { back.remove(); }
+  });
+  back.querySelector("#theme-close").addEventListener("click", () => back.remove());
+
+  back.querySelectorAll(".theme-card").forEach(card => {
+    card.addEventListener("click", () => {
+      const id = card.dataset.themeId;
+      if (id === "__system__") {
+        saveThemePref("system");
+        applyTheme(resolveTheme("system"));
+      } else {
+        const t = findTheme(id);
+        if (!t) return;
+        saveThemePref(id);
+        applyTheme(t);
+      }
+      onChange();
+      // Re-render the picker so aria-pressed + the Current section
+      // reflect the new selection. Matches the openTokenModal pattern.
+      back.remove();
+      openThemePickerModal({ onChange });
     });
   });
 }
@@ -532,6 +850,18 @@ function hideLogLoader() {
 }
 
 const ANSI16 = ["#000000","#cd3131","#0dbc79","#e5e510","#2472c8","#bc3fbc","#11a8cd","#e5e5e5","#666666","#f14c4c","#23d18b","#f5f543","#3b8eea","#d670d6","#29b8db","#ffffff"];
+// Now that ANSI16 exists (it was in the TDZ for the boot applyTheme()
+// call near the top of the file), re-apply the resolved theme so its
+// palette lands in ANSI16 before any session renders.
+(function _bootSyncAnsi16(){
+  try {
+    const t = resolveTheme(loadThemePref());
+    if (t && t.palette && t.palette.length >= 16) {
+      ANSI16.length = 0;
+      for (let i = 0; i < 16; i++) ANSI16.push(t.palette[i]);
+    }
+  } catch (e) {}
+})();
 function ansi256(n){if(n<16)return ANSI16[n];if(n<232){n-=16;const r=Math.floor(n/36),g=Math.floor((n%36)/6),b=n%6;const cv=v=>v===0?0:55+v*40;return`rgb(${cv(r)},${cv(g)},${cv(b)})`;}const gr=8+(n-232)*10;return`rgb(${gr},${gr},${gr})`;}
 function cellStyle(c){let s="";if(c.isFgRGB&&c.isFgRGB()){const fg=c.getFgColor();s+="color:#"+("000000"+fg.toString(16)).slice(-6)+";";}else if(c.isFgPalette&&c.isFgPalette())s+="color:"+ansi256(c.getFgColor())+";";if(c.isBgRGB&&c.isBgRGB()){const bg=c.getBgColor();s+="background:#"+("000000"+bg.toString(16)).slice(-6)+";";}else if(c.isBgPalette&&c.isBgPalette())s+="background:"+ansi256(c.getBgColor())+";";if(c.isBold&&c.isBold())s+="font-weight:bold;";if(c.isItalic&&c.isItalic())s+="font-style:italic;";if(c.isUnderline&&c.isUnderline())s+="text-decoration:underline;";if(c.isInverse&&c.isInverse())s+="filter:invert(1);";if(c.isDim&&c.isDim())s+="opacity:0.7;";return s;}
 function renderLogHTML(){

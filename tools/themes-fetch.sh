@@ -1,0 +1,217 @@
+#!/usr/bin/env bash
+# Re-fetch and bundle terminal themes from storm119/Tilix-Themes into
+# relay/lib/themes.js. Companion notice file with attribution + sha256
+# pin is written to relay/lib/THEMES_NOTICE.
+#
+# Run from a clean tree, then `git diff` to inspect the new bundle
+# before committing. The upstream commit SHA is embedded in both the
+# bundle banner and the NOTICE so reviewers can re-derive the output.
+#
+# Tilix-Themes has no LICENSE file; its README credits "all the
+# original theme author(s)". We treat the bundle as attribution-only
+# redistribution. If a theme's author wants it removed, open an issue.
+
+set -euo pipefail
+
+cd "$(cd "$(dirname "${BASH_SOURCE[0]}")"/.. && pwd)"
+
+OUT_JS="relay/lib/themes.js"
+OUT_NOTICE="relay/lib/THEMES_NOTICE"
+UPSTREAM="storm119/Tilix-Themes"
+
+WORK="$(mktemp -d -t termpilot-themes.XXXXXX)"
+trap 'rm -rf "$WORK"' EXIT
+
+echo "→ resolving upstream HEAD SHA"
+HEAD_SHA="$(curl -sSfL "https://api.github.com/repos/${UPSTREAM}/commits/master" \
+  | python3 -c 'import sys,json; print(json.load(sys.stdin)["sha"])')"
+echo "  master = ${HEAD_SHA}"
+
+echo "→ downloading tarball"
+curl -sSfL "https://codeload.github.com/${UPSTREAM}/tar.gz/${HEAD_SHA}" \
+  -o "$WORK/tilix.tgz"
+
+echo "→ extracting"
+tar -xzf "$WORK/tilix.tgz" -C "$WORK"
+THEMES_DIR="$(find "$WORK" -maxdepth 2 -type d -name Themes | head -n1)"
+if [[ -z "${THEMES_DIR:-}" ]]; then
+  echo "  ERROR: no Themes/ directory in tarball" >&2
+  exit 1
+fi
+count="$(find "$THEMES_DIR" -maxdepth 1 -type f -name '*.json' | wc -l)"
+echo "  found $count theme files"
+
+echo "→ normalising into $OUT_JS"
+THEMES_DIR="$THEMES_DIR" \
+HEAD_SHA="$HEAD_SHA" \
+UPSTREAM="$UPSTREAM" \
+OUT_JS="$OUT_JS" \
+OUT_NOTICE="$OUT_NOTICE" \
+python3 - <<'PY'
+import json, os, re, sys, unicodedata, datetime
+from pathlib import Path
+
+themes_dir = Path(os.environ["THEMES_DIR"])
+head_sha   = os.environ["HEAD_SHA"]
+upstream   = os.environ["UPSTREAM"]
+out_js     = Path(os.environ["OUT_JS"])
+out_notice = Path(os.environ["OUT_NOTICE"])
+
+def slug(name):
+    s = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode()
+    s = s.lower()
+    s = re.sub(r"[^a-z0-9]+", "-", s).strip("-")
+    return s or "theme"
+
+# Relative-luminance per WCAG. Treat bg > 0.5 as light.
+def lum(hex_color):
+    h = hex_color.lstrip("#")
+    if len(h) == 3:
+        h = "".join(c*2 for c in h)
+    r, g, b = (int(h[i:i+2], 16)/255.0 for i in (0, 2, 4))
+    def chan(c):
+        return c/12.92 if c <= 0.03928 else ((c + 0.055)/1.055) ** 2.4
+    return 0.2126*chan(r) + 0.7152*chan(g) + 0.0722*chan(b)
+
+def norm_hex(s):
+    s = s.strip().lower()
+    if not s.startswith("#"):
+        s = "#" + s
+    if not re.fullmatch(r"#[0-9a-f]{3}|#[0-9a-f]{6}", s):
+        raise ValueError(f"bad hex: {s!r}")
+    if len(s) == 4:
+        s = "#" + "".join(c*2 for c in s[1:])
+    return s
+
+entries = []
+problems = []
+for path in sorted(themes_dir.glob("*.json")):
+    try:
+        data = json.loads(path.read_text())
+        name    = str(data["name"]).strip()
+        fg      = norm_hex(data["foreground-color"])
+        bg      = norm_hex(data["background-color"])
+        palette = [norm_hex(c) for c in data["palette"]]
+        if len(palette) != 16:
+            raise ValueError(f"palette len {len(palette)} != 16")
+        comment = str(data.get("comment", "")).strip()
+        entries.append({
+            "id": slug(name),
+            "name": name,
+            "fg": fg,
+            "bg": bg,
+            "palette": palette,
+            "isLight": lum(bg) > 0.5,
+            "comment": comment,
+            "source": path.name,
+        })
+    except Exception as e:
+        problems.append((path.name, str(e)))
+
+if problems:
+    print("  FAILED to parse:", file=sys.stderr)
+    for n, e in problems:
+        print(f"    {n}: {e}", file=sys.stderr)
+    sys.exit(1)
+
+# Dedupe slugs (defensive — upstream is consistent today).
+seen = {}
+for e in entries:
+    base = e["id"]; n = 1; sid = base
+    while sid in seen:
+        n += 1; sid = f"{base}-{n}"
+    seen[sid] = True
+    e["id"] = sid
+
+entries.sort(key=lambda e: e["name"].lower())
+
+ids = {e["id"] for e in entries}
+DEFAULT_DARK_ID = "one-dark"
+DEFAULT_LIGHT_ID = "github"
+for need in (DEFAULT_DARK_ID, DEFAULT_LIGHT_ID):
+    if need not in ids:
+        print(f"  ERROR: required default id '{need}' missing from bundle", file=sys.stderr)
+        sys.exit(1)
+
+# Emit themes.js. Keep it readable so reviewers can diff it.
+def dump_entry(e):
+    pal = ", ".join(f'"{c}"' for c in e["palette"])
+    return (
+        '  {\n'
+        f'    id: {json.dumps(e["id"])},\n'
+        f'    name: {json.dumps(e["name"])},\n'
+        f'    fg: "{e["fg"]}", bg: "{e["bg"]}", isLight: {"true" if e["isLight"] else "false"},\n'
+        f'    palette: [{pal}],\n'
+        f'    comment: {json.dumps(e["comment"])}\n'
+        '  }'
+    )
+
+js = []
+js.append("// AUTO-GENERATED by tools/themes-fetch.sh — do not edit by hand.")
+js.append(f"// Source: https://github.com/{upstream}")
+js.append(f"// Commit: {head_sha}")
+js.append(f"// Themes: {len(entries)} (sorted by name, ANSI 16-colour palette)")
+js.append("// See relay/lib/THEMES_NOTICE for attribution and the bundle checksum.")
+js.append("")
+js.append("window.TPThemes = {")
+js.append(f"  DEFAULT_DARK_ID: {json.dumps(DEFAULT_DARK_ID)},")
+js.append(f"  DEFAULT_LIGHT_ID: {json.dumps(DEFAULT_LIGHT_ID)},")
+js.append("  THEMES: [")
+js.append(",\n".join(dump_entry(e) for e in entries))
+js.append("  ]")
+js.append("};")
+js.append("")
+
+out_js.write_text("\n".join(js))
+
+# Compute sha256 of the bundle now that the file is on disk.
+import hashlib
+digest = hashlib.sha256(out_js.read_bytes()).hexdigest()
+
+notice = []
+notice.append("Bundled terminal themes for the TermPilot relay browser app.")
+notice.append("")
+notice.append(f"Upstream:  https://github.com/{upstream}")
+notice.append(f"Commit:    {head_sha}")
+notice.append(f"Themes:    {len(entries)}")
+notice.append(f"Generated: {datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}")
+notice.append("")
+notice.append("License posture:")
+notice.append("  The Tilix-Themes repository has no LICENSE file. Its README")
+notice.append("  credits 'all the original theme author(s)' and describes the")
+notice.append("  collection as ports of schemes gathered from various sources.")
+notice.append("  We redistribute the bundle here under presumed-permissive")
+notice.append("  terms. If you authored a theme included below and want it")
+notice.append("  removed, please open an issue against TermPilot and we will")
+notice.append("  drop it.")
+notice.append("")
+notice.append("Bundle checksum (sha256 of relay/lib/themes.js):")
+notice.append(f"  {digest}")
+notice.append("")
+notice.append("Defaults used by the picker when the user has not made a")
+notice.append("manual selection:")
+notice.append(f"  dark:  {DEFAULT_DARK_ID}")
+notice.append(f"  light: {DEFAULT_LIGHT_ID}")
+notice.append("")
+notice.append("To refresh: run tools/themes-fetch.sh from a clean tree, then")
+notice.append("`git diff` to inspect the new bytes before committing. The")
+notice.append("checksum above is over the regenerated themes.js bytes.")
+notice.append("")
+notice.append("Theme attribution (name — id — upstream filename — comment):")
+notice.append("-" * 72)
+for e in entries:
+    line = f"  {e['name']}  [id: {e['id']}]  ({e['source']})"
+    notice.append(line)
+    if e["comment"]:
+        notice.append(f"    {e['comment']}")
+notice.append("")
+out_notice.write_text("\n".join(notice))
+
+print(f"  ok  wrote {out_js} ({len(entries)} themes)")
+print(f"  ok  wrote {out_notice}")
+print(f"  sha256 themes.js = {digest}")
+PY
+
+echo
+echo "Bundle regenerated. Review with:"
+echo "  git diff $OUT_JS $OUT_NOTICE"

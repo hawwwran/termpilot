@@ -90,6 +90,8 @@ upload "$SRC_DIR/.htaccess"                 ".htaccess"
 upload "$SRC_DIR/lib/crypto.js"             "lib/crypto.js"
 upload "$SRC_DIR/lib/session.js"            "lib/session.js"
 upload "$SRC_DIR/lib/keyboard.js"           "lib/keyboard.js"
+upload "$SRC_DIR/lib/themes.js"             "lib/themes.js"
+upload "$SRC_DIR/lib/THEMES_NOTICE"         "lib/THEMES_NOTICE"
 upload "$SRC_DIR/lib/index.css"             "lib/index.css"
 upload "$SRC_DIR/lib/index.js"              "lib/index.js"
 # Vendored third-party assets (see relay/lib/vendor/NOTICE).

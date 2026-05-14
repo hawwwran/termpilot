@@ -1,0 +1,158 @@
+Bundled terminal themes for the TermPilot relay browser app.
+
+Upstream:  https://github.com/storm119/Tilix-Themes
+Commit:    9a60818b8cb43d973e78567e7a47fe4d3bdbc3e3
+Themes:    64
+Generated: 2026-05-14T21:18:27Z
+
+License posture:
+  The Tilix-Themes repository has no LICENSE file. Its README
+  credits 'all the original theme author(s)' and describes the
+  collection as ports of schemes gathered from various sources.
+  We redistribute the bundle here under presumed-permissive
+  terms. If you authored a theme included below and want it
+  removed, please open an issue against TermPilot and we will
+  drop it.
+
+Bundle checksum (sha256 of relay/lib/themes.js):
+  b992f9e0730ac7d66a495da2ab7b675ab654835896805193f3fea1508ba84191
+
+Defaults used by the picker when the user has not made a
+manual selection:
+  dark:  one-dark
+  light: github
+
+To refresh: run tools/themes-fetch.sh from a clean tree, then
+`git diff` to inspect the new bytes before committing. The
+checksum above is over the regenerated themes.js bytes.
+
+Theme attribution (name — id — upstream filename — comment):
+------------------------------------------------------------------------
+  3024 Day  [id: 3024-day]  (3024-day.json)
+    Ported for Terminix Scheme
+  3024 Night  [id: 3024-night]  (3024-night.json)
+    Ported for Terminix Scheme
+  AdventureTime  [id: adventuretime]  (adventuretime.json)
+    Ported for Terminix Colour Scheme
+  Afterglow  [id: afterglow]  (afterglow.json)
+    Ported for Terminix Colour Scheme
+  Alien Blood  [id: alien-blood]  (alien-blood.json)
+    Ported for Terminix Colour Scheme
+  Argonaut  [id: argonaut]  (argonaut.json)
+    Ported for Terminix Colour Scheme
+  Arthur  [id: arthur]  (arthur.json)
+    Ported for Terminix Colour Scheme
+  Atom  [id: atom]  (atom.json)
+    Ported for Terminix Colour Scheme
+  Belafonte Day  [id: belafonte-day]  (belafonte-day.json)
+    Ported for Terminix Colour Scheme
+  Belafonte Night  [id: belafonte-night]  (belafonte-night.json)
+    Ported for Terminix Colour Scheme
+  BirdsOfParadise  [id: birdsofparadise]  (birds-of-paradise.json)
+    Ported for Terminix Colour Scheme
+  Blazer  [id: blazer]  (blazer.json)
+    Ported for Terminix Colour Scheme
+  Borland  [id: borland]  (borland.json)
+    Ported for Terminix Colour Scheme
+  Broadcast  [id: broadcast]  (broadcast.json)
+    Ported for Terminix Colour Scheme
+  Brogrammer  [id: brogrammer]  (brogrammer.json)
+    Ported for Terminix Colour Scheme
+  C64  [id: c64]  (c64.json)
+    Ported for Terminix Colour Scheme
+  Chalk  [id: chalk]  (chalk.json)
+    Ported for Terminix Colour Scheme
+  Chalkboard  [id: chalkboard]  (chalkboard.json)
+    Ported for Terminix Colour Scheme
+  Ciapre  [id: ciapre]  (ciapre.json)
+    Ported for Terminix Colour Scheme
+  CLRS  [id: clrs]  (clrs.json)
+    Ported for Terminix Colour Scheme
+  Cobalt Neon  [id: cobalt-neon]  (cobalt-neon.json)
+    Ported for Terminix Colour Scheme
+  Cobalt2  [id: cobalt2]  (cobalt2.json)
+    Ported for Terminix Colour Scheme
+  Crayon Pony Fish  [id: crayon-pony-fish]  (crayon-pony-fish.json)
+    Ported for Terminix Colour Scheme
+  Dark Pastel  [id: dark-pastel]  (dark-pastel.json)
+    Ported for Terminix Colour Scheme
+  Darkside  [id: darkside]  (darkside.json)
+    Ported for Terminix Colour Scheme
+  Desert  [id: desert]  (desert.json)
+    Ported for Terminix Colour Scheme
+  Dimmed Monokai  [id: dimmed-monokai]  (dimmed-monokai.json)
+    Ported for Terminix Colour Scheme
+  Dracula  [id: dracula]  (dracula.json)
+    Ported for Terminix Colour Scheme
+  Earthsong  [id: earthsong]  (earthsong.json)
+    Ported for Terminix Colour Scheme
+  Elemental  [id: elemental]  (elemental.json)
+    Ported for Terminix Colour Scheme
+  Espresso  [id: espresso]  (espresso.json)
+    Ported for Terminix Colour Scheme
+  Espresso Libre  [id: espresso-libre]  (espresso-libre.json)
+    Ported for Terminix Colour Scheme
+  Fishtank  [id: fishtank]  (fishtank.json)
+    Ported for Terminix Colour Scheme
+  Flat  [id: flat]  (flat.json)
+    Ported for Terminix Colour Scheme
+  Flatland  [id: flatland]  (flatland.json)
+    Ported for Terminix Colour Scheme
+  Flatty  [id: flatty]  (flatty.json)
+    A simple original flat theme for Tilix
+  Frontend Delight  [id: frontend-delight]  (frontend-delight.json)
+    Ported for Terminix Colour Scheme
+  Frontend Fun Forrest  [id: frontend-fun-forrest]  (frontend-fun-forrest.json)
+    Ported for Terminix Colour Scheme
+  Frontend Galaxy  [id: frontend-galaxy]  (frontend-galaxy.json)
+    Ported for Terminix Colour Scheme
+  Github  [id: github]  (github.json)
+    Ported for Terminix Colour Scheme
+  Grape  [id: grape]  (grape.json)
+    Ported for Terminix Colour Scheme
+  Grass  [id: grass]  (grass.json)
+    Ported for Terminix Colour Scheme
+  Gruvbox for Tilix  [id: gruvbox-for-tilix]  (gruvbox.json)
+    Ported for Trilix Colour Scheme
+  Hardcore  [id: hardcore]  (hardcore.json)
+    Ported for Terminix Colour Scheme
+  Harper  [id: harper]  (harper.json)
+    Ported for Terminix Colour Scheme
+  Highway  [id: highway]  (highway.json)
+    Ported for Terminix Colour Scheme
+  Hipster Green  [id: hipster-green]  (hipster-green.json)
+    Ported for Terminix Colour Scheme
+  Homebrew  [id: homebrew]  (homebrew.json)
+    Ported for Terminix Colour Scheme
+  Hurtado  [id: hurtado]  (hurtado.json)
+    Ported for Terminix Colour Scheme
+  Hybrid  [id: hybrid]  (hybrid.json)
+    Based on w0ng-Hybrid Ported for Terminix Colour Scheme
+  IC Green PPL  [id: ic-green-ppl]  (ic-green-ppl.json)
+    Ported for Terminix Colour Scheme
+  IC Orange PPL  [id: ic-orange-ppl]  (ic-orange-ppl.json)
+    Ported for Terminix Colour Scheme
+  Idle Toes  [id: idle-toes]  (idle-toes.json)
+    Ported for Terminix Colour Scheme
+  IR Black  [id: ir-black]  (ir-black.json)
+    Ported for Terminix Colour Scheme
+  Jackie Brown  [id: jackie-brown]  (jackie-brown.json)
+    Ported for Terminix Colour Scheme
+  Japanesque  [id: japanesque]  (japanesque.json)
+    Ported for Terminix Colour Scheme
+  Jellybeans  [id: jellybeans]  (jellybeans.json)
+    Ported for Terminix Colour Scheme
+  Kibble  [id: kibble]  (kibble.json)
+    Ported for Terminix Colour Scheme
+  Later This Evening  [id: later-this-evening]  (later-this-evening.json)
+    Ported for Terminix Colour Scheme
+  Lavandula  [id: lavandula]  (lavandula.json)
+    Ported for Terminix Colour Scheme
+  Liquid Carbon  [id: liquid-carbon]  (liquid-carbon.json)
+    Ported for Terminix Colour Scheme
+  Liquid Carbon Transparent  [id: liquid-carbon-transparent]  (liquid-carbon-transparent.json)
+    Ported for Terminix Colour Scheme
+  One Dark  [id: one-dark]  (one-dark.json)
+    Ported for Terminix Colour Scheme
+  Terminix Dark  [id: terminix-dark]  (terminix-dark.json)
+    Created by storm119 for Terminix Colour Scheme
