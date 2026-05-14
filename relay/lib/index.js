@@ -239,6 +239,11 @@ function openTokenModal(opts = {}) {
       </div>
       <h2 style="margin-top:18px">Push notifications</h2>
       <div class="row" id="modal-push-row"></div>
+      <h2 style="margin-top:18px">Diagnostics</h2>
+      <div class="row">
+        <button type="button" id="modal-test-conn">Test connection</button>
+        <pre id="modal-test-result" class="diag-out" hidden></pre>
+      </div>
       <div class="row actions">
         <button id="modal-close">${initial ? "save and continue" : "close"}</button>
       </div>
@@ -267,6 +272,26 @@ function openTokenModal(opts = {}) {
     }
     TPSession.addToken(name || "device", hex.toLowerCase());
     back.remove(); openTokenModal({ initial });
+  });
+  $("#modal-test-conn").addEventListener("click", async () => {
+    // Probe the relay's debug.php so the user can tell whether perceived
+    // slowness is transport (high wall, low server) or the relay itself.
+    // The secret used is whatever's in the modal field right now (so the
+    // user can test a freshly-typed secret before saving).
+    const out = $("#modal-test-result");
+    const btn = $("#modal-test-conn");
+    const secret = $("#modal-secret") ? $("#modal-secret").value.trim()
+                                      : TPSession.loadSecret();
+    btn.disabled = true;
+    out.hidden = false;
+    out.textContent = "Running probes…";
+    try {
+      out.textContent = await runConnectionDiagnostic(secret);
+    } catch (e) {
+      out.textContent = "Failed: " + (e && e.message || e);
+    } finally {
+      btn.disabled = false;
+    }
   });
   $("#modal-close").addEventListener("click", () => {
     const secInput = $("#modal-secret");
@@ -303,6 +328,76 @@ function openTokenModal(opts = {}) {
       }
     });
   });
+}
+
+// Hit debug.php a few times and return a small text report. Same shape
+// as `termpilot --test-connection` so the two surfaces stay comparable.
+// Reads the secret directly (not via TPSession.loadSecret) so the user
+// can test a value they just typed but haven't saved yet.
+async function runConnectionDiagnostic(secret) {
+  const DEBUG = RELAY.replace(/relay\.php(\?.*)?$/, "debug.php");
+  async function probe(op) {
+    const t0 = performance.now();
+    const headers = secret ? { "Authorization": "Bearer " + secret } : {};
+    const r = await fetch(`${DEBUG}?op=${op}`, { headers, cache: "no-store" });
+    const wall = performance.now() - t0;
+    if (!r.ok) {
+      const txt = await r.text();
+      throw new Error(`HTTP ${r.status}: ${txt.slice(0, 120)}`);
+    }
+    const body = await r.json();
+    return { wall, server: Number(body.server_ms || 0), body };
+  }
+  const stats = arr => {
+    if (!arr.length) return "(n=0)";
+    const s = [...arr].sort((a, b) => a - b);
+    const p50 = s[s.length >> 1];
+    const p95 = s[Math.max(0, Math.round(s.length * 0.95) - 1)];
+    return `min ${s[0].toFixed(0)}  p50 ${p50.toFixed(0)}  p95 ${p95.toFixed(0)}  max ${s[s.length-1].toFixed(0)} ms  (n=${s.length})`;
+  };
+  // Warm-up to avoid counting cold-cache TLS handshake — drops the first
+  // request from the report.
+  try { await probe("ping"); } catch (e) { throw e; }
+  const ping = [];
+  for (let i = 0; i < 8; i++) {
+    try { ping.push(await probe("ping")); } catch (e) { /* skip individual flake */ }
+  }
+  const fs = [];
+  for (let i = 0; i < 3; i++) {
+    try { fs.push(await probe("fs")); } catch (e) { /* skip */ }
+  }
+  const net = ping.map(p => p.wall - p.server);
+  const lines = [];
+  lines.push("Ping (no server work):");
+  lines.push("  wall RTT     " + stats(ping.map(p => p.wall)));
+  lines.push("  server time  " + stats(ping.map(p => p.server)));
+  lines.push("  network      " + stats(net));
+  lines.push("");
+  lines.push("FS probe (write+read+append+cleanup):");
+  lines.push("  wall RTT     " + stats(fs.map(p => p.wall)));
+  lines.push("  server time  " + stats(fs.map(p => p.server)));
+  if (fs.length) {
+    const subs = {};
+    for (const r of fs) {
+      for (const [k, v] of Object.entries(r.body.timings_ms || {})) {
+        (subs[k] = subs[k] || []).push(Number(v));
+      }
+    }
+    for (const k of Object.keys(subs).sort()) {
+      lines.push(`    ${k.padEnd(16)} ${stats(subs[k])}`);
+    }
+  }
+  lines.push("");
+  const p50net = net.length ? [...net].sort((a, b) => a - b)[net.length >> 1] : 0;
+  const p50srv = ping.length ? [...ping.map(p => p.server)].sort((a, b) => a - b)[ping.length >> 1] : 0;
+  if (p50net > 500) {
+    lines.push(`Verdict: NETWORK looks slow (p50 RTT-overhead ${p50net.toFixed(0)} ms).`);
+  } else if (p50srv > 200) {
+    lines.push(`Verdict: RELAY looks slow (p50 server-time ${p50srv.toFixed(0)} ms).`);
+  } else {
+    lines.push("Verdict: connection looks healthy.");
+  }
+  return lines.join("\n");
 }
 
 function renderPushRow(host) {

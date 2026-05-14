@@ -226,6 +226,10 @@ button:hover { background:#262c3a; }
 .termpilot-net-banner[hidden] { display:none; }
 .termpilot-net-banner.severe { background:#d95757; color:#fff; }
 
+/* Diagnostics output in the settings modal */
+.diag-out { margin:8px 0 0; padding:8px 10px; background:#0d0f12; border:1px solid #2a2f3a; border-radius:6px; color:#dbe5ff; font-family: ui-monospace, Menlo, Consolas, monospace; font-size:11px; line-height:1.45; white-space:pre-wrap; word-break:break-word; max-height:320px; overflow:auto; }
+.diag-out[hidden] { display:none; }
+
 /* ==== Mobile ==== */
 .mobile-only { display:none; }
 .desktop-only { display:inline-flex; align-items:center; justify-content:center; }

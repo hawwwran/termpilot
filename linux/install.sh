@@ -83,7 +83,8 @@ termpilot() {
         --set-relay-secret|set-relay-secret|\\
         --clear-relay-secret|clear-relay-secret|\\
         --version|version|-V|\\
-        --update|update)
+        --update|update|\\
+        --test-connection|test-connection)
             "$WRAP_PATH" "\$@"
             return
             ;;

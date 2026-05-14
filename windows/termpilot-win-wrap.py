@@ -90,6 +90,7 @@ Setup (run once)
   termpilot --show-token                 print the stored token
   termpilot --version                    print installed version + check for newer
   termpilot --update                     check for newer release and install if any
+  termpilot --test-connection            probe relay latency + server time
   termpilot --help                       this message
 
 Run
@@ -395,6 +396,42 @@ def cmd_clear_relay_secret(args):
     except OSError as e:
         sys.stderr.write(f"termpilot: cannot remove {SECRET_FILE}: {e}\n")
         return 1
+
+
+def cmd_test_connection(argv):
+    p = argparse.ArgumentParser(prog="termpilot --test-connection", add_help=True,
+                                allow_abbrev=False)
+    p.add_argument("--relay", default=os.environ.get("TERMPILOT_RELAY"))
+    p.add_argument("--auth", default=None,
+                   help="Bearer secret for the relay (fallback: $TERMPILOT_SECRET, "
+                        "then %APPDATA%\\termpilot\\relay-secret).")
+    p.add_argument("--insecure", action="store_true",
+                   help="skip TLS cert verification")
+    p.add_argument("--ping-count", type=int, default=10)
+    p.add_argument("--fs-count", type=int, default=3)
+    args = p.parse_args(argv)
+
+    base = args.relay
+    if not base and os.path.exists(RELAY_URL_FILE):
+        try:
+            base = open(RELAY_URL_FILE).read().strip()
+        except OSError:
+            base = None
+    if not base:
+        sys.stderr.write(
+            "termpilot: no relay URL configured.\n"
+            "  Set one with:  termpilot --set-relay-url https://your.host/path\n"
+        )
+        return 2
+
+    secret = _resolve_auth_secret(args.auth) or ""
+    from shared import connection_test
+    return connection_test.run(
+        base, secret,
+        insecure=args.insecure,
+        ping_count=args.ping_count,
+        fs_count=args.fs_count,
+    )
 
 
 def _resolve_auth_secret(arg_value):
@@ -1247,6 +1284,8 @@ def main(argv=None):
     if argv and argv[0] in ("update", "--update"):
         from shared import release_channel
         return release_channel.cmd_update(argv[1:], SCRIPT_DIR)
+    if argv and argv[0] in ("test-connection", "--test-connection"):
+        return cmd_test_connection(argv[1:])
     if argv and argv[0] == "run":
         return cmd_run(argv[1:])
     return cmd_run(argv)

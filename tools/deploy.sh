@@ -39,7 +39,7 @@ filesize() { wc -c < "$1" | tr -d ' '; }
 mkdir -p "$BACKUP_DIR/lib"
 
 echo "Backing up live files into $BACKUP_DIR"
-for f in relay.php index.html .htaccess \
+for f in relay.php debug.php index.html .htaccess \
          manifest.webmanifest sw.js \
          icon-192.png icon-512.png icon-maskable-192.png icon-maskable-512.png; do
   if "${CURL[@]}" -o "$BACKUP_DIR/$f" "ftp://$FTP_HOST/$f" 2>/dev/null; then
@@ -84,6 +84,7 @@ fi
 echo "  sw.js stamped with version ${TERMPILOT_VERSION}"
 
 upload "$SRC_DIR/relay.php"                 "relay.php"
+upload "$SRC_DIR/debug.php"                 "debug.php"
 upload "$SRC_DIR/index.html"                "index.html"
 upload "$SRC_DIR/.htaccess"                 ".htaccess"
 upload "$SRC_DIR/lib/crypto.js"             "lib/crypto.js"
