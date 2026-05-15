@@ -528,7 +528,7 @@ CRASH_RECOVERY_SECS = 5 * 60
 USAGE = """\
 termpilot — view and control any terminal over an encrypted relay.
 
-Setup (run once)
+Setup (run once per machine)
   termpilot --set-relay-url URL          persist your relay's URL
   termpilot --get-relay-url              print the configured relay URL
   termpilot --set-relay-secret SECRET    persist the relay's Bearer token
@@ -536,24 +536,45 @@ Setup (run once)
   termpilot --clear-relay-secret         forget the relay's Bearer token
   termpilot --generate-token             create / replace your encryption token
   termpilot --show-token                 reveal the stored token (gated by sudo)
-  termpilot --version                    print installed version + check for newer
-  termpilot --update                     check for newer release and install if any
-  termpilot --test-connection            probe relay latency + server time
+
+Lifecycle
   termpilot --help                       this message
+  termpilot --version                    print installed version + check for newer
+  termpilot --update                     download newer release and install if any
+  termpilot --uninstall                  remove termpilot from this machine
+                                         (accepts --dry-run / --yes; refuses
+                                         to run from a git checkout)
+  termpilot --test-connection            probe relay latency + server time
 
-Run
-  termpilot                          spawn $SHELL through the wrapper
-  termpilot bash                     spawn bash explicitly
-  termpilot tmux new -A -s main      persistent tmux session (survives detach)
-  termpilot htop                     any interactive program in a PTY
-  termpilot -- bash --foo            use -- only when the child takes a flag
-                                     that collides with a wrapper flag
+Run a session
+  termpilot                              spawn $SHELL through the wrapper
+  termpilot bash                         spawn bash explicitly
+  termpilot tmux new -A -s main          persistent tmux session (survives detach)
+  termpilot htop                         any interactive program in a PTY
+  termpilot -- bash --foo                use -- when the child takes a flag
+                                         that collides with a wrapper flag
 
-  --instance NAME  resilience-slot label within this cwd. Defaults to the
-                   controlling TTY's pts label (e.g. 'pts-3') so two
-                   terminals in one cwd get separate slots automatically.
-                   $TERMPILOT_INSTANCE wins over TTY; --instance wins
-                   over both. Charset [a-zA-Z0-9_.-], length 1-64.
+  Per-run flags (mix in before the program name):
+    --title TEXT       Session title shown in the browser. Default: basename
+                       of $PWD.
+    --instance NAME    Resilience-slot label within this cwd. Defaults to
+                       the controlling TTY's pts label (e.g. 'pts-3') so two
+                       terminals in one cwd get separate slots automatically.
+                       $TERMPILOT_INSTANCE wins over TTY; --instance wins
+                       over both. Charset [a-zA-Z0-9_.-], length 1-64.
+    --relay URL        Override the persisted relay URL for this run only.
+                       Same effect as $TERMPILOT_RELAY in the environment.
+    --auth TOKEN       Override the persisted relay Bearer for this run only.
+                       Fallback chain: --auth > $TERMPILOT_SECRET > the
+                       ~/.config/termpilot/relay-secret file.
+    --no-local         Don't accept input from the local terminal. Output
+                       still prints locally; only the browser/phone can type
+                       into the session. Useful when piping stdin or in CI.
+    --insecure         Skip TLS cert verification. For local dev only
+                       (e.g. against `php -S` with a self-signed cert).
+    --force            Start anyway if the per-cwd lock looks held by
+                       another wrapper — typically after a crash where the
+                       lock file wasn't cleaned up.
 
 Configuration files (under ~/.config/termpilot/)
   relay-url        base URL of the relay deployment (set via --set-relay-url);
@@ -561,6 +582,12 @@ Configuration files (under ~/.config/termpilot/)
   relay-secret     optional Bearer secret for the relay (set via
                    --set-relay-secret, removed via --clear-relay-secret)
   token            encryption token if no OS keyring is available
+
+Environment variables
+  TERMPILOT_RELAY     overrides relay-url for one command
+  TERMPILOT_SECRET    overrides relay-secret for one command
+  TERMPILOT_INSTANCE  overrides the auto-derived instance label
+  TERMPILOT_DEBUG=1   mirror ~/.cache/termpilot/events.log to stderr
 
 Sudo gate:
   Token-management commands ask for your sudo password (or use sudo's

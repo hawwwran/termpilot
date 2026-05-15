@@ -27,6 +27,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WRAP_PATH="$SCRIPT_DIR/termpilot-wrap"
+UNINSTALL_PATH="$SCRIPT_DIR/uninstall.sh"
 CONFIG_DIR="$HOME/.config/termpilot"
 RELAY_URL_FILE="$CONFIG_DIR/relay-url"
 SECRET_FILE="$CONFIG_DIR/relay-secret"
@@ -64,6 +65,7 @@ cat > "$ALIAS_FILE" <<EOF
 #   termpilot --clear-relay-secret        forget the relay Bearer token
 #   termpilot --generate-token             create or replace the encryption token
 #   termpilot --show-token                 reveal the stored token (after password)
+#   termpilot --uninstall                  remove termpilot from this machine
 #   termpilot                              spawn \$SHELL through the wrapper
 #   termpilot bash                         spawn bash explicitly
 #   termpilot tmux new -A -s main          attach/create persistent tmux session
@@ -75,6 +77,18 @@ termpilot() {
         return 1
     fi
     case "\${1:-}" in
+        --uninstall|uninstall)
+            # Route to the sibling uninstall.sh. From a dev-mode shim the
+            # script lives in the checkout and will refuse via its .git
+            # guard, telling the user to use the deployed copy.
+            if [[ ! -x "$UNINSTALL_PATH" ]]; then
+                echo "termpilot: $UNINSTALL_PATH is missing or not executable" >&2
+                return 1
+            fi
+            shift
+            "$UNINSTALL_PATH" "\$@"
+            return
+            ;;
         --help|-h|help|\\
         --generate-token|generate-token|\\
         --show-token|show-token|\\
@@ -123,6 +137,203 @@ if ! command -v tp >/dev/null 2>&1; then
     alias tp=termpilot
 fi
 EOF
+
+# Append the bash completion in a single-quoted heredoc so we don't have to
+# escape every $ in the function body. Sources alongside the function above,
+# so users get `termpilot --h<Tab>` → `termpilot --help` without extra setup.
+cat >> "$ALIAS_FILE" <<'EOF'
+
+# --- Tab completion (bash + zsh) -----------------------------------------
+# Same function body works in zsh once `bashcompinit` is loaded. The zsh
+# branch silently no-ops if the user's setup doesn't have `compinit`
+# loaded (rare — Oh-My-Zsh, Prezto, and most manual configs load it).
+_termpilot_complete() {
+    local cur prev
+    COMPREPLY=()
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    prev="${COMP_WORDS[COMP_CWORD-1]:-}"
+
+    # Refuse to complete after flags whose argument is a secret or
+    # free-form value — completing a secret to a filename would be
+    # confusing at best, leaky at worst.
+    case "$prev" in
+        --set-relay-secret|set-relay-secret|--auth)
+            return 0 ;;
+        --set-relay-url|set-relay-url|--relay|--title|--instance)
+            return 0 ;;
+    esac
+
+    # Top-level verbs (mutually-exclusive with running a program).
+    local verbs="--help -h help
+        --version version -V
+        --update update
+        --uninstall uninstall
+        --test-connection test-connection
+        --generate-token generate-token
+        --show-token show-token
+        --set-relay-url set-relay-url
+        --get-relay-url get-relay-url
+        --set-relay-secret set-relay-secret
+        --clear-relay-secret clear-relay-secret"
+    # Flags that ride alongside the program being wrapped.
+    local run_flags="--title --no-local --insecure --force --instance --relay --auth"
+
+    if [[ "$cur" == -* ]]; then
+        COMPREPLY=( $(compgen -W "$verbs $run_flags" -- "$cur") )
+        return 0
+    fi
+
+    # First positional: offer verbs plus anything on $PATH, so
+    # `termpilot tm<Tab>` → `termpilot tmux` works.
+    if [[ $COMP_CWORD -eq 1 ]]; then
+        COMPREPLY=( $(compgen -W "$verbs" -- "$cur") )
+        COMPREPLY+=( $(compgen -c -- "$cur") )
+        return 0
+    fi
+
+    # Past the first arg: file/dir completion is the most useful default.
+    COMPREPLY=( $(compgen -f -- "$cur") )
+    return 0
+}
+
+if [[ -n "${BASH_VERSION:-}" ]]; then
+    complete -F _termpilot_complete termpilot
+    # Only attach to `tp` if it's still pointing at us — don't hijack the
+    # completion of whatever tool installed a `tp` of its own.
+    if alias tp 2>/dev/null | grep -q '=.termpilot.'; then
+        complete -F _termpilot_complete tp
+    fi
+elif [[ -n "${ZSH_VERSION:-}" ]]; then
+    # `complete -F` is a bash builtin; bashcompinit ports it into zsh.
+    # Errors silenced so users without compinit don't see noise on startup.
+    if autoload -U +X bashcompinit 2>/dev/null && bashcompinit 2>/dev/null; then
+        complete -F _termpilot_complete termpilot 2>/dev/null
+        if alias tp 2>/dev/null | grep -q '=.termpilot.'; then
+            complete -F _termpilot_complete tp 2>/dev/null
+        fi
+    fi
+fi
+EOF
+
+# --- Fish: function + completion (only when fish is present) --------------
+# Fish doesn't read .bashrc / .zshrc, and bash function syntax doesn't
+# parse there. We ship a parallel fish function and a native fish
+# completion file, both auto-loaded by fish.
+FISH_FN=""
+FISH_COMP=""
+if command -v fish >/dev/null 2>&1 || [[ -d "$HOME/.config/fish" ]]; then
+    FISH_FN="$HOME/.config/fish/functions/termpilot.fish"
+    FISH_COMP="$HOME/.config/fish/completions/termpilot.fish"
+    mkdir -p "$(dirname "$FISH_FN")" "$(dirname "$FISH_COMP")"
+
+    # Function — mirrors the bash version's logic but in fish syntax.
+    cat > "$FISH_FN" <<EOF
+# Auto-generated by $SCRIPT_DIR/install.sh on $NOW_ISO
+# Re-run install.sh from any termpilot checkout to repoint termpilot there.
+# Source: $SCRIPT_DIR
+function termpilot --description 'TermPilot session wrapper'
+    set -l wrap "$WRAP_PATH"
+    set -l uninstaller "$UNINSTALL_PATH"
+    if not test -x "\$wrap"
+        echo "termpilot: \$wrap is missing or not executable — re-run install.sh" >&2
+        return 1
+    end
+    switch "\$argv[1]"
+        case --uninstall uninstall
+            if not test -x "\$uninstaller"
+                echo "termpilot: \$uninstaller is missing or not executable" >&2
+                return 1
+            end
+            "\$uninstaller" \$argv[2..-1]
+            return \$status
+        case --help -h help \\
+             --generate-token generate-token \\
+             --show-token show-token \\
+             --set-relay-url set-relay-url \\
+             --get-relay-url get-relay-url \\
+             --set-relay-secret set-relay-secret \\
+             --clear-relay-secret clear-relay-secret \\
+             --version version -V \\
+             --update update \\
+             --test-connection test-connection
+            "\$wrap" \$argv
+            return \$status
+    end
+    set -l tp_relay ""
+    if test -r "$RELAY_URL_FILE"
+        set tp_relay (cat "$RELAY_URL_FILE")
+    end
+    if test -z "\$tp_relay"
+        echo "termpilot: relay URL not configured." >&2
+        echo "  Run: termpilot --set-relay-url https://your.host/path" >&2
+        return 2
+    end
+    set -l tp_secret ""
+    if test -r "$SECRET_FILE"
+        set tp_secret (cat "$SECRET_FILE")
+    end
+    set -l default_shell "\$SHELL"
+    test -z "\$default_shell"; and set default_shell /bin/bash
+    set -lx TERMPILOT_RELAY "\$tp_relay"
+    set -lx TERMPILOT_SECRET "\$tp_secret"
+    if test (count \$argv) -eq 0
+        "\$wrap" run --title (basename "\$PWD") -- "\$default_shell"
+    else
+        "\$wrap" run --title (basename "\$PWD") \$argv
+    end
+end
+
+# Short alias 'tp' — only when nothing else claims it.
+if not type -q tp
+    alias tp=termpilot
+    funcsave tp >/dev/null 2>&1
+end
+EOF
+
+    # Completion — fish's native DSL. No need for the heredoc to expand.
+    cat > "$FISH_COMP" <<'EOF'
+# Auto-generated by install.sh. Re-run install.sh to refresh.
+# Disable file completion by default; individual rules re-enable it
+# where appropriate (e.g. the program-to-run argument).
+complete -c termpilot -f
+
+complete -c termpilot -l help            -d 'Show usage'
+complete -c termpilot -l version         -d 'Show version'
+complete -c termpilot -l update          -d 'Re-download bundled wrapper'
+complete -c termpilot -l uninstall       -d 'Remove termpilot from this machine'
+complete -c termpilot -l test-connection -d 'Probe relay reachability'
+complete -c termpilot -l generate-token  -d 'Create/replace the encryption token'
+complete -c termpilot -l show-token      -d 'Reveal the stored token (after sudo)'
+complete -c termpilot -l set-relay-url   -d 'Persist the relay URL'           -r
+complete -c termpilot -l get-relay-url   -d 'Print the configured relay URL'
+complete -c termpilot -l set-relay-secret   -d 'Persist the relay Bearer token' -r
+complete -c termpilot -l clear-relay-secret -d 'Forget the relay Bearer token'
+
+complete -c termpilot -l title    -d 'Session title' -r
+complete -c termpilot -l no-local -d "Don't echo to local terminal"
+complete -c termpilot -l insecure -d 'Allow self-signed relay cert'
+complete -c termpilot -l force    -d 'Override another wrapper holding the cwd lock'
+complete -c termpilot -l instance -d 'Override auto-derived instance name' -r
+complete -c termpilot -l relay    -d 'Override TERMPILOT_RELAY for this run' -r
+complete -c termpilot -l auth     -d 'Override TERMPILOT_SECRET for this run' -r
+
+# Verb forms without leading --.
+complete -c termpilot -n '__fish_is_first_token' -a help               -d 'Show usage'
+complete -c termpilot -n '__fish_is_first_token' -a version            -d 'Show version'
+complete -c termpilot -n '__fish_is_first_token' -a update             -d 'Re-download bundled wrapper'
+complete -c termpilot -n '__fish_is_first_token' -a uninstall          -d 'Remove termpilot from this machine'
+complete -c termpilot -n '__fish_is_first_token' -a test-connection    -d 'Probe relay reachability'
+complete -c termpilot -n '__fish_is_first_token' -a generate-token     -d 'Create/replace the encryption token'
+complete -c termpilot -n '__fish_is_first_token' -a show-token         -d 'Reveal the stored token (after sudo)'
+complete -c termpilot -n '__fish_is_first_token' -a set-relay-url      -d 'Persist the relay URL'
+complete -c termpilot -n '__fish_is_first_token' -a get-relay-url      -d 'Print the configured relay URL'
+complete -c termpilot -n '__fish_is_first_token' -a set-relay-secret   -d 'Persist the relay Bearer token'
+complete -c termpilot -n '__fish_is_first_token' -a clear-relay-secret -d 'Forget the relay Bearer token'
+
+# First positional argument that doesn't match a verb: a program to run.
+complete -c termpilot -n '__fish_is_first_token' -a '(__fish_complete_command)' -d 'Run program in PTY'
+EOF
+fi
 
 # --- Idempotent source-block in shell rc files ---------------------------
 # Pick rc files based on which shells the user actually uses. macOS users
@@ -183,6 +394,10 @@ echo "  defined in:   $ALIAS_FILE"
 echo "  binary:       $WRAP_PATH"
 echo "  config dir:   $CONFIG_DIR"
 echo "  rc files:     ${PATCHED_FILES[*]}"
+if [[ -n "$FISH_FN" ]]; then
+    echo "  fish func:    $FISH_FN"
+    echo "  fish compl:   $FISH_COMP"
+fi
 
 # Report whether the 'tp' shortcut will activate on next shell start.
 # The alias file does the real decision at runtime; this is just to

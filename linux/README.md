@@ -148,6 +148,34 @@ nothing else on the system already provides a `tp` command; install a
 conflicting tool later and the alias silently steps aside on the next
 shell start.
 
+The generated shim also registers tab completion for `termpilot` (and
+`tp` when it's our alias): `termpilot --h<Tab>` → `--help`, flag
+prefixes expand, secret-taking flags (`--set-relay-secret`, `--auth`)
+deliberately refuse to complete to avoid spraying filenames into a
+secret slot. Works in bash directly and in zsh via `bashcompinit`.
+If `fish` is detected on the system, the installer also drops a
+fish-native function at `~/.config/fish/functions/termpilot.fish` and
+matching completions next to it.
+
+To remove everything (shim, config, cache, install bundle, fish files,
+keyring entry, rc-file source block):
+
+```sh
+termpilot --uninstall                          # interactive (recommended)
+termpilot --uninstall --dry-run                # preview only
+termpilot --uninstall --yes                    # non-interactive
+
+# Or invoke the script directly — same flags, same behaviour:
+~/.local/share/termpilot/uninstall.sh
+```
+
+`termpilot --uninstall` dispatches to the `uninstall.sh` that ships
+next to the wrapper. If your shim is in dev mode (pointed at a git
+checkout), the sibling script lives inside the checkout — its
+built-in `.git` guard will refuse and tell you to run the deployed
+copy instead, so you never accidentally wipe deployed state from a
+dev tree.
+
 `--set-relay-secret` writes `~/.config/termpilot/relay-secret`
 (chmod 600). The wrapper refuses to load that file if perms are
 looser. Use `--clear-relay-secret` to remove it later. If your relay
@@ -245,6 +273,7 @@ What you see after extracting `termpilot-linux-macos.zip`:
 termpilot-wrap               main wrapper binary (multi-subcommand)
 install.sh                   installs the `termpilot` shell function
 install-latest-version.sh    end-user bootstrap (downloads latest release zip)
+uninstall.sh                 reverses install.sh; removes config, cache, rc-block, fish files, keyring entry
 VERSION.json                 release metadata, read by --version / --update
 README.md                    this file
 lib/                         Linux/macOS-specific Python modules (keystore.py)
@@ -260,7 +289,7 @@ The Windows port ships as a separate `termpilot-windows.zip`; see the
 termpilot/
 ├── linux/                       Linux/macOS wrapper + installers + tests
 │   ├── termpilot-wrap
-│   ├── install.sh, install-latest-version.sh
+│   ├── install.sh, install-latest-version.sh, uninstall.sh
 │   ├── lib/keystore.py
 │   ├── tests/                   run with tests/run-all.sh from inside linux/
 │   └── README.md                this file
