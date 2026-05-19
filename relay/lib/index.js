@@ -1025,6 +1025,12 @@ const NET_SLOW_DURATION_MS = 1500;
 const NET_SEVERE_DURATION_MS = 4000;
 const NET_BACKLOG_THRESH = 20;
 const NET_BACKLOG_CONSEC = 3;
+// Warm re-attach with a backlog larger than this slides the loading overlay
+// over the cached HTML for the duration of the silent catch-up. Below the
+// threshold the cached state stays visible — a small catch-up renders in
+// one shot fast enough that hiding the cached content would feel jarrier
+// than the brief stale-then-fresh transition.
+const WARM_OVERLAY_BACKLOG = 2000;
 const _netSamples = [];
 let _netBacklogStreak = 0;
 let _netState = "ok";
@@ -1704,7 +1710,7 @@ async function pollLoop(sid, isWarm) {
         // like a delayed step-by-step update. The cached HTML stays in
         // place behind the opaque overlay, so a mid-catchup detach still
         // captures a valid logHtml.
-        if (isWarm && catchingUp && (total - outNextSeq) > 2000) {
+        if (isWarm && catchingUp && (total - outNextSeq) > WARM_OVERLAY_BACKLOG) {
           showLogLoader("Loading session…", { determinate: true });
           updateLogLoaderProgress(outNextSeq, total);
         }

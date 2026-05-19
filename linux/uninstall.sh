@@ -18,10 +18,10 @@
 #   - Any other tool's data
 #
 # Usage:
-#   ./uninstall.sh             # interactive — prompts before deleting
-#   ./uninstall.sh --yes       # non-interactive
-#   ./uninstall.sh --dry-run   # show what would be removed; do nothing
-#   ./uninstall.sh --help      # this message
+#   ./uninstall.sh                   # interactive — prompts before deleting
+#   ./uninstall.sh --yes        | -y # non-interactive
+#   ./uninstall.sh --dry-run    | -n # show what would be removed; do nothing
+#   ./uninstall.sh --help       | -h # this message
 
 set -euo pipefail
 

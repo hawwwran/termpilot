@@ -542,8 +542,8 @@ Lifecycle
   termpilot --version                    print installed version + check for newer
   termpilot --update                     download newer release and install if any
   termpilot --uninstall                  remove termpilot from this machine
-                                         (accepts --dry-run / --yes; refuses
-                                         to run from a git checkout)
+                                         (accepts --dry-run / --yes / -y;
+                                         refuses to run from a git checkout)
   termpilot --test-connection            probe relay latency + server time
 
 Run a session
