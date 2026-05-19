@@ -167,7 +167,10 @@ section { display:flex; flex-direction:column; min-width:0; min-height:0; }
 #log .cursor { background:var(--tp-fg); color:var(--tp-bg); }
 #log-loading { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px; background:var(--tp-bg); color:var(--tp-fg-dim); font-size:13px; z-index:5; pointer-events:none; }
 #log-loading[hidden] { display:none; }
-#log-loading .loader-spinner { width:32px; height:32px; border:3px solid var(--tp-bg-selected); border-top-color:var(--tp-accent-strong); border-radius:50%; animation:termpilot-spin 800ms linear infinite; }
+#log-loading .loader-progress { width: min(360px, 60%); height:6px; background:var(--tp-bg-selected); border-radius:3px; overflow:hidden; position:relative; }
+#log-loading .loader-progress-fill { height:100%; width:0; background:var(--tp-accent-strong); transition: width 120ms linear; }
+#log-loading .loader-progress.indeterminate .loader-progress-fill { width:40%; animation: termpilot-progress-slide 1100ms ease-in-out infinite; }
+@keyframes termpilot-progress-slide { 0% { transform: translateX(-100%); } 100% { transform: translateX(250%); } }
 #term-host { position:absolute; left:-9999px; top:0; width:0; height:0; overflow:hidden; visibility:hidden; }
 
 .ctrl { display:flex; flex-wrap:wrap; gap:4px; padding:6px 8px; border-top:1px solid var(--tp-border); background:var(--tp-bg-elev2); }

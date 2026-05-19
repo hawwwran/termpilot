@@ -864,16 +864,55 @@ sessionTerms.set("_boot", _bootEntry);
 term = _bootEntry.term;
 const logEl = document.getElementById("log");
 const logLoaderEl = document.getElementById("log-loading");
-function showLogLoader(label) {
+// Loader state: a deferred-show timer lets fast loads skip the bar entirely
+// (avoids a flash), and a monotonic progress clamp keeps the bar from
+// regressing when `total` grows mid-catchup (new records arrive while we
+// drain history).
+const _loaderState = { showTimer: null, progressMax: 0, fillEl: null, barEl: null };
+function _loaderEls() {
+  if (!_loaderState.fillEl && logLoaderEl) {
+    _loaderState.fillEl = logLoaderEl.querySelector(".loader-progress-fill");
+    _loaderState.barEl  = logLoaderEl.querySelector(".loader-progress");
+  }
+}
+function showLogLoader(label, opts) {
   if (!logLoaderEl) return;
+  _loaderEls();
+  const { delayMs = 0, determinate = false } = opts || {};
   if (label) {
     const lbl = logLoaderEl.querySelector(".loader-label");
     if (lbl) lbl.textContent = label;
   }
-  logLoaderEl.hidden = false;
+  if (_loaderState.barEl) _loaderState.barEl.classList.toggle("indeterminate", !determinate);
+  if (_loaderState.fillEl && determinate) _loaderState.fillEl.style.width = "0%";
+  _loaderState.progressMax = 0;
+  if (_loaderState.showTimer) { clearTimeout(_loaderState.showTimer); _loaderState.showTimer = null; }
+  if (delayMs > 0) {
+    _loaderState.showTimer = setTimeout(() => {
+      _loaderState.showTimer = null;
+      logLoaderEl.hidden = false;
+    }, delayMs);
+  } else {
+    logLoaderEl.hidden = false;
+  }
 }
 function hideLogLoader() {
-  if (logLoaderEl) logLoaderEl.hidden = true;
+  if (!logLoaderEl) return;
+  _loaderEls();
+  if (_loaderState.showTimer) { clearTimeout(_loaderState.showTimer); _loaderState.showTimer = null; }
+  logLoaderEl.hidden = true;
+  _loaderState.progressMax = 0;
+  if (_loaderState.fillEl) _loaderState.fillEl.style.width = "0%";
+  if (_loaderState.barEl)  _loaderState.barEl.classList.add("indeterminate");
+}
+function updateLogLoaderProgress(current, total) {
+  if (!logLoaderEl || !total || total <= 0) return;
+  _loaderEls();
+  let pct = Math.round(100 * Math.min(current, total) / total);
+  if (pct < _loaderState.progressMax) pct = _loaderState.progressMax;
+  _loaderState.progressMax = pct;
+  if (_loaderState.barEl) _loaderState.barEl.classList.remove("indeterminate");
+  if (_loaderState.fillEl) _loaderState.fillEl.style.width = pct + "%";
 }
 
 const ANSI16 = ["#000000","#cd3131","#0dbc79","#e5e510","#2472c8","#bc3fbc","#11a8cd","#e5e5e5","#666666","#f14c4c","#23d18b","#f5f543","#3b8eea","#d670d6","#29b8db","#ffffff"];
@@ -1582,11 +1621,14 @@ async function attach(sid, tokenId) {
   inNextSeq = entry.inNextSeq;
   if (isWarm) {
     logEl.innerHTML = entry.logHtml;
-    hideLogLoader();
+    // Don't hide the loader here. detach() already hid it; pollLoop's first
+    // response decides whether to bring the overlay back (for backlogs
+    // > 2000) so the user sees a determinate bar rather than stale cached
+    // HTML during a long catch-up.
     setStatus("re-attached: " + sid.slice(0,6));
   } else {
     logEl.innerHTML = "";
-    showLogLoader("Loading session…");
+    showLogLoader("Loading session…", { delayMs: 200 });
     setStatus("attached: " + sid.slice(0,6));
   }
   // Always land at the bottom on open — newest output is what you want
@@ -1603,7 +1645,7 @@ async function attach(sid, tokenId) {
       relayBase: new URL(RELAY, location.href).href,
     });
   }
-  pollLoop(sid);
+  pollLoop(sid, isWarm);
 }
 
 function _concatBytes(chunks) {
@@ -1616,12 +1658,16 @@ function _concatBytes(chunks) {
   return out;
 }
 
-async function pollLoop(sid) {
+async function pollLoop(sid, isWarm) {
   pollAbort = new AbortController();
   _netReset();
   // Treat the first batch(es) as catchup: pull bigger pages and skip
   // intermediate renders so a long history doesn't visibly play back.
   let catchingUp = true;
+  // One-shot guard for the warm-overlay decision below: we need to know the
+  // backlog size (only available in the first /output response) before we
+  // can decide whether to slide the loading overlay over the cached HTML.
+  let firstResponse = true;
   // Consecutive decrypt failures across batches. Past a small threshold
   // we surface a loud error and stop polling — silently skipping every
   // record while the cursor walks forward would let a hostile relay (or
@@ -1650,6 +1696,19 @@ async function pollLoop(sid) {
       const records = body.records || [];
       const next = Number(body.next_seq || outNextSeq);
       const total = Number(body.total || next);
+      if (firstResponse) {
+        firstResponse = false;
+        // Warm re-attach + long backlog: slide the loading overlay over the
+        // stale cached HTML. Otherwise the DOM would sit on old content for
+        // seconds during silent catch-up, then jump to fresh state — feels
+        // like a delayed step-by-step update. The cached HTML stays in
+        // place behind the opaque overlay, so a mid-catchup detach still
+        // captures a valid logHtml.
+        if (isWarm && catchingUp && (total - outNextSeq) > 2000) {
+          showLogLoader("Loading session…", { determinate: true });
+          updateLogLoaderProgress(outNextSeq, total);
+        }
+      }
       const chunks = [];
       let batchFails = 0;
       for (const rec of records) {
@@ -1700,6 +1759,11 @@ async function pollLoop(sid) {
         catchingUp = false;
       }
       outNextSeq = next;
+      // Drive the progress bar regardless of cold/warm path; no-op when
+      // total is unknown or the loader is hidden. Monotonic clamp inside
+      // updateLogLoaderProgress prevents stutter if total grows during
+      // catch-up (live records arriving while we drain history).
+      updateLogLoaderProgress(next, total);
       if (!_netCatchupSample) {
         // Sum of decrypted plaintext is a close-enough proxy for response
         // body size — the actual wire payload is plaintext + ~28 bytes of

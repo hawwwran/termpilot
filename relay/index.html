@@ -70,7 +70,10 @@
     <div class="log-area">
       <pre id="log"></pre>
       <div id="log-loading" hidden>
-        <div class="loader-spinner" aria-hidden="true"></div>
+        <div class="loader-progress indeterminate" role="progressbar"
+             aria-label="Loading session" aria-valuemin="0" aria-valuemax="100">
+          <div class="loader-progress-fill"></div>
+        </div>
         <div class="loader-label">Loading session…</div>
       </div>
     </div>
