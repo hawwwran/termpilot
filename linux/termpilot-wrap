@@ -305,6 +305,241 @@ def clear_active_json(cwd: str, instance: str) -> None:
         pass
 
 
+def _proc_cmdline(pid: int) -> str | None:
+    # /proc on Linux; on macOS fall back to `ps`. Either yields a single
+    # joined string or None (no such pid / not permitted).
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            raw = f.read()
+        return " ".join(p.decode("utf-8", "replace") for p in raw.split(b"\0") if p)
+    except OSError:
+        pass
+    try:
+        import subprocess
+        r = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            capture_output=True, text=True, timeout=2,
+        )
+        if r.returncode == 0:
+            line = r.stdout.strip()
+            return line or None
+    except Exception:
+        pass
+    return None
+
+
+def _proc_cwd(pid: int) -> str | None:
+    try:
+        return os.readlink(f"/proc/{pid}/cwd")
+    except OSError:
+        pass
+    # macOS: no /proc, no portable cwd reader without lsof. Skip — the row
+    # still prints with the cwd-hash fallback.
+    return None
+
+
+def _proc_is_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except (ProcessLookupError, PermissionError, OSError):
+        return False
+
+
+def _is_wrapper_run(cmdline: str | None) -> bool:
+    """True iff cmdline looks like a termpilot wrapper running a session
+    (excludes --test-connection, --generate-token, etc.)."""
+    if not cmdline or "termpilot-wrap" not in cmdline:
+        return False
+    parts = cmdline.split()
+    try:
+        i = next(i for i, p in enumerate(parts) if "termpilot-wrap" in p)
+    except StopIteration:
+        return False
+    after = parts[i + 1:]
+    if not after:
+        return False
+    return after[0] == "run"
+
+
+def collect_wrapper_inventory(self_pid: int | None = None) -> list[dict]:
+    """Enumerate active.json entries plus any live wrappers without one.
+    No network calls; purely /proc + ~/.cache walk."""
+    if self_pid is None:
+        self_pid = os.getpid()
+    rows = []
+    matched_pids = set()
+    base = os.path.join(CACHE_BASE, "cwd")
+    if os.path.isdir(base):
+        try:
+            hashes = os.listdir(base)
+        except OSError:
+            hashes = []
+        for h in hashes:
+            hdir = os.path.join(base, h)
+            if not os.path.isdir(hdir):
+                continue
+            try:
+                instances = os.listdir(hdir)
+            except OSError:
+                continue
+            for inst in instances:
+                idir = os.path.join(hdir, inst)
+                p = os.path.join(idir, "active.json")
+                if not os.path.isfile(p):
+                    continue
+                try:
+                    with open(p) as f:
+                        obj = json.load(f)
+                except (OSError, ValueError):
+                    continue
+                pid = int(obj.get("pid") or 0)
+                sid = obj.get("wrapper_sid") or ""
+                ts  = int(obj.get("ts") or 0)
+                cmdline = _proc_cmdline(pid) if pid else None
+                # If we can read the cmdline, verify it's still a wrapper
+                # (defends against PID reuse). If we can't (macOS, denied,
+                # etc.), trust os.kill(pid,0): worst case we mislabel a
+                # recycled PID, which is harmless cache-display drift.
+                if cmdline is not None:
+                    alive = _is_wrapper_run(cmdline)
+                else:
+                    alive = _proc_is_alive(pid)
+                cwd_path = _proc_cwd(pid) if alive else None
+                if alive:
+                    matched_pids.add(pid)
+                rows.append({
+                    "pid": pid, "sid": sid, "ts": ts, "alive": alive,
+                    "instance": inst, "cwd_hash": h,
+                    "cwd": cwd_path, "cmdline": cmdline,
+                    "from_cache": True,
+                })
+    try:
+        pid_dirs = os.listdir("/proc")
+    except OSError:
+        pid_dirs = []
+    for name in pid_dirs:
+        if not name.isdigit():
+            continue
+        pid = int(name)
+        if pid == self_pid or pid in matched_pids:
+            continue
+        cmdline = _proc_cmdline(pid)
+        if not _is_wrapper_run(cmdline):
+            continue
+        rows.append({
+            "pid": pid, "sid": "", "ts": 0, "alive": True,
+            "instance": "?", "cwd_hash": "",
+            "cwd": _proc_cwd(pid), "cmdline": cmdline,
+            "from_cache": False,
+        })
+    return rows
+
+
+def _format_age(secs: float) -> str:
+    if secs < 0:
+        return "—"
+    if secs < 90:
+        return f"{int(secs)}s"
+    if secs < 3600:
+        return f"{int(secs // 60)}m"
+    if secs < 86400:
+        h = int(secs // 3600); m = int((secs % 3600) // 60)
+        return f"{h}h{m:02d}m"
+    d = int(secs // 86400); h = int((secs % 86400) // 3600)
+    return f"{d}d{h:02d}h"
+
+
+def render_wrapper_inventory(out=sys.stdout) -> None:
+    """Print the local-wrapper inventory to `out`. Used by --test-connection."""
+    rows = collect_wrapper_inventory()
+    use_color = hasattr(out, "isatty") and out.isatty()
+
+    def col(s: str, code: str) -> str:
+        return f"\033[{code}m{s}\033[0m" if use_color else s
+
+    running = sum(1 for r in rows if r["alive"])
+    cached  = sum(1 for r in rows if r["from_cache"])
+    stale   = sum(1 for r in rows if r["from_cache"] and not r["alive"])
+
+    if running >= 10:
+        running_str = col(str(running), "1;31")
+        warn = "  HIGH — risky on small FPM pools; close terminals you don't need"
+    elif running >= 5:
+        running_str = col(str(running), "1;33")
+        warn = "  moderate — watch this if relay latency climbs"
+    else:
+        running_str = col(str(running), "1;32")
+        warn = ""
+
+    out.write("\nLocal wrappers:\n")
+    out.write(f"  running: {running_str}{warn}\n")
+    out.write(f"  cached:  {cached} (stale: {stale})\n")
+    if not rows:
+        return
+
+    rows.sort(key=lambda r: (not r["alive"], -(r["ts"] or 0)))
+    alive_rows = [r for r in rows if r["alive"]]
+    stale_rows = [r for r in rows if not r["alive"]]
+    STALE_SHOW = 10
+    stale_shown = stale_rows[:STALE_SHOW]
+    stale_hidden = len(stale_rows) - len(stale_shown)
+    now = int(time.time())
+
+    def _row(r):
+        age = _format_age(now - r["ts"]) if r["ts"] else "—"
+        state = "ALIVE" if r["alive"] else "stale"
+        state_disp = col(f"{state:<6}", "32" if r["alive"] else "31")
+        pid_s = str(r["pid"]) if r["pid"] else "—"
+        sid = (r["sid"] or "—")[:14]
+        instance = (r["instance"] or "—")[:10]
+        if r["cwd"]:
+            where = r["cwd"]
+        elif r["cwd_hash"]:
+            where = f"(hash {r['cwd_hash'][:8]})"
+        else:
+            where = "—"
+        cmd_tail = ""
+        if r["cmdline"]:
+            parts = r["cmdline"].split()
+            try:
+                i = next(i for i, p in enumerate(parts) if "termpilot-wrap" in p)
+                tail = parts[i + 1:]
+                if tail and tail[0] == "run":
+                    tail = tail[1:]
+                cmd_tail = " ".join(tail)
+            except StopIteration:
+                pass
+        line_right = where
+        if cmd_tail:
+            line_right += f"   {cmd_tail}"
+        if len(line_right) > 72:
+            line_right = line_right[:71] + "…"
+        out.write(
+            f"  {pid_s:>7}  {instance:<10} {sid:<14} {age:>6}  "
+            f"{state_disp} {line_right}\n"
+        )
+
+    out.write(
+        f"\n  {'PID':>7}  {'Instance':<10} {'Sid':<14} {'Age':>6}  "
+        f"{'State':<6} Where\n"
+    )
+    for r in alive_rows:
+        _row(r)
+    for r in stale_shown:
+        _row(r)
+    if stale_hidden > 0:
+        out.write(f"  … {stale_hidden} older stale entries hidden\n")
+    if running >= 5:
+        out.write(
+            "\n  Tip: to find the terminal owning a wrapper, look up its PID's parent\n"
+            "       process — e.g.  ps -o pid,ppid,args -p <PID>  then  ps <PPID>\n"
+            "       Close that terminal (or SIGTERM the wrapper) to free the FPM slot.\n"
+        )
+
+
 def cleanup_stale_sid_dirs(keep_sid: str, max_age_secs: int = 7 * 24 * 3600) -> None:
     """Delete spool dirs older than max_age_secs (besides keep_sid). Non-fatal
     on any error — this is housekeeping, not core function."""
@@ -1053,6 +1288,16 @@ def cmd_test_connection(argv):
         return 2
 
     secret = _resolve_auth_secret(args.auth) or ""
+    # Print the local-wrapper inventory first: it's purely local (no
+    # network) and answers "what's my load on the relay?" instantly,
+    # before the network probes that may stall for many seconds on a
+    # bad link. flush() so the user sees it even if a later probe hangs.
+    try:
+        render_wrapper_inventory()
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+    except Exception as e:
+        sys.stderr.write(f"  (wrapper inventory failed: {e})\n")
     from shared import connection_test
     return connection_test.run(
         base, secret,
