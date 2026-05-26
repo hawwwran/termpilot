@@ -734,6 +734,14 @@ def handle_gc(argv):
                "    list all live wrappers with age + last-output columns\n"
                "  tp gc --older-than 2h\n"
                "    filter to wrappers older than 2 hours (dry-run)\n"
+               "  tp gc --stale-for 30m\n"
+               "    filter to wrappers whose spool hasn't been written\n"
+               "    for 30+ minutes (catches abandoned non-TUI workers;\n"
+               "    Claude/TUI spool keeps growing from the spinner so\n"
+               "    use --older-than for those)\n"
+               "  tp gc --older-than 1h --stale-for 30m --kill\n"
+               "    AND of both: kill wrappers that are 1+ hours old\n"
+               "    AND haven't produced output for 30+ minutes\n"
                "  tp gc --older-than 24h --kill\n"
                "    terminate anything older than a day\n"
                "  tp gc --older-than 0s --kill --include-current\n"
@@ -743,13 +751,20 @@ def handle_gc(argv):
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("--older-than", metavar="DURATION", default=None,
-                   help="age threshold (forms: 90s, 30m, 2h, 1d). Required "
-                        "when --kill is given (safety: refuse to terminate "
-                        "the unfiltered set by accident). Pass "
+                   help="filter by AGE: wrappers whose process is older "
+                        "than DURATION (forms: 90s, 30m, 2h, 1d). Use "
                         "--older-than 0s to mean 'all ages'.")
+    p.add_argument("--stale-for", metavar="DURATION", default=None,
+                   help="filter by LAST-OUT: wrappers whose spool hasn't "
+                        "been written for at least DURATION. Catches "
+                        "non-TUI workers cleanly; for Claude/TUI workers "
+                        "the spool keeps growing from spinner redraws so "
+                        "prefer --older-than. Combine with --older-than "
+                        "for AND of both conditions.")
     p.add_argument("--kill", action="store_true",
                    help="actually terminate matching wrappers (requires "
-                        "--older-than). Default is dry-run / list-only.")
+                        "at least one of --older-than / --stale-for). "
+                        "Default is dry-run / list-only.")
     p.add_argument("--signal", default="TERM", metavar="NAME",
                    help="signal to send (without SIG prefix). Default: TERM. "
                         "Use KILL only if a polite TERM didn't take.")
@@ -760,20 +775,27 @@ def handle_gc(argv):
                    help="emit JSON instead of a table.")
     args = p.parse_args(argv)
 
-    if args.kill and args.older_than is None:
+    if args.kill and args.older_than is None and args.stale_for is None:
         sys.stderr.write(
-            "tp gc: --kill requires --older-than to avoid accidentally "
-            "terminating every wrapper.\n"
+            "tp gc: --kill requires at least one filter (--older-than / "
+            "--stale-for) to avoid accidentally terminating every wrapper.\n"
             "       Pass --older-than 0s if you really want 'all ages'.\n"
         )
         return 2
 
-    threshold = None
+    threshold_age = None
     if args.older_than is not None:
         try:
-            threshold = _parse_duration(args.older_than)
+            threshold_age = _parse_duration(args.older_than)
         except ValueError as e:
-            sys.stderr.write(f"tp gc: {e}\n")
+            sys.stderr.write(f"tp gc: --older-than: {e}\n")
+            return 2
+    threshold_stale = None
+    if args.stale_for is not None:
+        try:
+            threshold_stale = _parse_duration(args.stale_for)
+        except ValueError as e:
+            sys.stderr.write(f"tp gc: --stale-for: {e}\n")
             return 2
 
     try:
@@ -802,21 +824,32 @@ def handle_gc(argv):
         age = _process_age_seconds(pid)
         if age is None:
             continue
-        if threshold is not None and age < threshold:
+        if threshold_age is not None and age < threshold_age:
             continue
+        last_out = _last_out_seconds(s.get("sid"))
+        if threshold_stale is not None:
+            # Worker with no spool yet is treated as "infinitely stale":
+            # nothing has ever been written. Belongs in the stale set.
+            stale = last_out if last_out is not None else float("inf")
+            if stale < threshold_stale:
+                continue
         s = dict(s)
         s["age_secs"] = age
-        s["last_out_secs"] = _last_out_seconds(s.get("sid"))
+        s["last_out_secs"] = last_out
         candidates.append(s)
 
     candidates.sort(key=lambda s: s["age_secs"], reverse=True)
 
     if not candidates:
-        if threshold is not None:
-            excl = (f" (excluding current terminal {current_instance})"
+        if threshold_age is not None or threshold_stale is not None:
+            parts = []
+            if threshold_age is not None:
+                parts.append(f"older than {args.older_than}")
+            if threshold_stale is not None:
+                parts.append(f"stale for {args.stale_for}")
+            excl = (f", excluding current terminal {current_instance}"
                     if current_instance else "")
-            print(f"No candidates: no live wrappers older than "
-                  f"{args.older_than}{excl}.")
+            print(f"No candidates: no live wrappers {' AND '.join(parts)}{excl}.")
         else:
             note = (f" (excluded current terminal {current_instance})"
                     if excluded_current else "")
@@ -844,9 +877,9 @@ def handle_gc(argv):
                   "pass --include-current to include it)")
 
     if not args.kill:
-        if threshold is None:
-            print(f"\nListing only. Pass --older-than DURATION (and --kill) "
-                  "to terminate a subset.")
+        if threshold_age is None and threshold_stale is None:
+            print(f"\nListing only. Pass --older-than / --stale-for (and "
+                  "--kill) to terminate a subset.")
         else:
             print(f"\nDry-run: {len(candidates)} wrapper(s) would be killed "
                   f"with SIG{args.signal.upper()}. Pass --kill to act.")
