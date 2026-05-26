@@ -875,15 +875,11 @@ def _normalize_for_idle(text):
     return text
 
 
-def _screen_signature(sid, cols, rows):
-    """Pyte-render and return a normalized signature of the visible
-    screen. Two calls produce the same signature when the worker's
-    rendered output is identical modulo spinner/timer animation."""
-    screen, stream = _build_screen(cols, rows)
-    _feed_spool(stream, _spool_path(sid))
-    norm = "\n".join(_normalize_for_idle(line.rstrip())
+def _screen_signature(screen):
+    """Normalized signature of a pre-rendered pyte screen. Two snapshots
+    of the same screen-state-modulo-animation produce equal signatures."""
+    return "\n".join(_normalize_for_idle(line.rstrip())
                      for line in screen.display)
-    return norm, screen
 
 
 def wait_for_idle(sid, quiet_secs=15.0, timeout=600.0, since=None,
@@ -900,6 +896,9 @@ def wait_for_idle(sid, quiet_secs=15.0, timeout=600.0, since=None,
     behaviour. Use when the worker is a non-TUI script that periodically
     prints log lines and you want strict byte-level silence.
 
+    `since` is bytes-mode only and ignored in screen mode (screen mode
+    tracks its own offset internally via the cached pyte stream).
+
     Returns dict with:
       mode         "screen" or "bytes" (what was used).
       elapsed      total seconds spent waiting.
@@ -907,7 +906,10 @@ def wait_for_idle(sid, quiet_secs=15.0, timeout=600.0, since=None,
       spool_end    spool offset at idle time.
       lines        screen mode only: visible screen at idle time.
       cursor       screen mode only: cursor x/y at idle time.
-      bytes        bytes mode only: text accumulated since `since`.
+      bytes        bytes mode only: text accumulated since `since`. Empty
+                   if no explicit `since` was passed (default `since` is
+                   the spool size at call time, so by definition nothing
+                   has been written after it once we go idle).
       new_offset   bytes mode only: spool offset boss should pass next.
 
     Raises TimeoutError if no idle window of the requested length occurs
@@ -950,7 +952,26 @@ def wait_for_idle(sid, quiet_secs=15.0, timeout=600.0, since=None,
             time.sleep(0.25)
 
     # idle_mode == "screen"
-    last_sig, last_screen = _screen_signature(sid, cols, rows)
+    #
+    # Performance: build one pyte screen, do the initial O(spool-size)
+    # feed once, then incrementally feed only NEW bytes on each poll.
+    # The earlier implementation re-fed the entire spool every 250 ms,
+    # which on a multi-MB spool exceeded the poll interval and made the
+    # function never converge on large sessions.
+    screen, stream = _build_screen(cols, rows)
+    last_offset = 0
+    # Drain whatever was already in the spool when the call started. May
+    # take several seconds on multi-MB sessions; that's the one-time cost.
+    while True:
+        data, new_off, n = _read_spool_range(
+            sid, last_offset, max_bytes=16 * 1024 * 1024,
+        )
+        if n == 0:
+            break
+        stream.feed(data)
+        last_offset = new_off
+
+    last_sig = _screen_signature(screen)
     last_change_at = time.monotonic()
     while True:
         now = time.monotonic()
@@ -959,17 +980,25 @@ def wait_for_idle(sid, quiet_secs=15.0, timeout=600.0, since=None,
                 f"sid {sid!r} did not go idle for {quiet_secs}s "
                 f"within {timeout}s (mode=screen)"
             )
-        cur_sig, cur_screen = _screen_signature(sid, cols, rows)
+        # Feed only the delta since the previous poll.
+        while True:
+            data, new_off, n = _read_spool_range(
+                sid, last_offset, max_bytes=16 * 1024 * 1024,
+            )
+            if n == 0:
+                break
+            stream.feed(data)
+            last_offset = new_off
+        cur_sig = _screen_signature(screen)
         if cur_sig != last_sig:
             last_sig = cur_sig
-            last_screen = cur_screen
             last_change_at = now
         if now - last_change_at >= quiet_secs:
             return {
                 "mode": "screen",
-                "lines": [line.rstrip() for line in last_screen.display],
-                "cursor": {"x": last_screen.cursor.x, "y": last_screen.cursor.y},
-                "spool_end": _safe_getsize(path) or 0,
+                "lines": [line.rstrip() for line in screen.display],
+                "cursor": {"x": screen.cursor.x, "y": screen.cursor.y},
+                "spool_end": last_offset,
                 "elapsed": now - start,
                 "idle_for": now - last_change_at,
             }
