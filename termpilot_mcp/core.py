@@ -309,11 +309,11 @@ def _row_to_ansi(screen, y, cols):
         out.append(ch.data or " ")
     if cur_sgr:
         out.append("\x1b[0m")
-    # Trim trailing whitespace + the reset that follows it, if any
-    s = "".join(out)
-    # Drop trailing-space runs that were never styled; keep styled trailing
-    # spaces because they carry e.g. background colour
-    return s.rstrip()
+    # rstrip drops trailing whitespace including styled spaces, which
+    # loses background-colour info at line ends. Acceptable trade-off
+    # for keeping output clean; preserving styled trailing space would
+    # require tracking the rightmost styled cell explicitly.
+    return "".join(out).rstrip()
 
 
 def render_screen(sid, cols=DEFAULT_SCREEN_COLS, rows=DEFAULT_SCREEN_ROWS,
