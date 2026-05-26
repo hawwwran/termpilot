@@ -2385,8 +2385,10 @@ def _mcp_client_specs(venv_python, wrap_real, claude_scope):
                 "    [mcp_servers.termpilot]\n"
                 f'    command = "{venv_python}"\n'
                 f'    args = ["{wrap_real}", "mcp-serve"]\n'
-                "  (Run `codex mcp --help` to verify the exact subcommand\n"
-                "  name; older Codex versions may use a different schema.)\n"
+                "  (Both the `codex mcp` subcommand and the TOML schema key\n"
+                "  shown above vary across Codex CLI versions; run `codex\n"
+                "  mcp --help` and check the docs for your installed version\n"
+                "  if the snippet above doesn't take.)\n"
             ),
         },
     ]
