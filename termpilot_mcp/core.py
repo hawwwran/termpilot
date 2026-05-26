@@ -241,26 +241,103 @@ def _feed_spool(stream, path):
     return bytes_fed, frames_fed, end_off
 
 
-def render_screen(sid, cols=DEFAULT_SCREEN_COLS, rows=DEFAULT_SCREEN_ROWS):
+# pyte stores colours as named strings ('red', 'brightblue', 'default')
+# or 6-hex strings ('ff7733'). Map names to SGR digits; hex falls through
+# to the truecolour 38;2;R;G;B / 48;2;R;G;B encoding.
+_PYTE_FG_CODES = {
+    "black": 30, "red": 31, "green": 32, "brown": 33, "yellow": 33,
+    "blue": 34, "magenta": 35, "cyan": 36, "white": 37, "default": 39,
+    "brightblack": 90, "brightred": 91, "brightgreen": 92,
+    "brightbrown": 93, "brightyellow": 93,
+    "brightblue": 94, "brightmagenta": 95, "brightcyan": 96, "brightwhite": 97,
+}
+_PYTE_BG_CODES = {k: v + 10 for k, v in _PYTE_FG_CODES.items()}
+_HEX6_RE = re.compile(r"^[0-9a-fA-F]{6}$")
+
+
+def _color_to_sgr(color, *, is_fg):
+    if not color or color == "default":
+        return None
+    codes = _PYTE_FG_CODES if is_fg else _PYTE_BG_CODES
+    if color in codes:
+        return str(codes[color])
+    if _HEX6_RE.match(color):
+        r, g, b = int(color[0:2], 16), int(color[2:4], 16), int(color[4:6], 16)
+        return f"{'38' if is_fg else '48'};2;{r};{g};{b}"
+    return None
+
+
+def _sgr_for_char(char):
+    """SGR sequence (including the \\x1b[ prefix and m suffix) that paints
+    a single char's style from a clean state. Returns '' for the default
+    cell so plain text has no inline codes."""
+    parts = []
+    fg = _color_to_sgr(getattr(char, "fg", None), is_fg=True)
+    bg = _color_to_sgr(getattr(char, "bg", None), is_fg=False)
+    if fg:
+        parts.append(fg)
+    if bg:
+        parts.append(bg)
+    if getattr(char, "bold", False):
+        parts.append("1")
+    if getattr(char, "italics", False):
+        parts.append("3")
+    if getattr(char, "underscore", False):
+        parts.append("4")
+    if getattr(char, "reverse", False):
+        parts.append("7")
+    if getattr(char, "strikethrough", False):
+        parts.append("9")
+    if not parts:
+        return ""
+    return f"\x1b[{';'.join(parts)}m"
+
+
+def _row_to_ansi(screen, y, cols):
+    """Render one screen row to a string with inline ANSI codes."""
+    out = []
+    cur_sgr = ""
+    for x in range(cols):
+        ch = screen.buffer[y][x]
+        sgr = _sgr_for_char(ch)
+        if sgr != cur_sgr:
+            if cur_sgr:
+                out.append("\x1b[0m")
+            if sgr:
+                out.append(sgr)
+            cur_sgr = sgr
+        out.append(ch.data or " ")
+    if cur_sgr:
+        out.append("\x1b[0m")
+    # Trim trailing whitespace + the reset that follows it, if any
+    s = "".join(out)
+    # Drop trailing-space runs that were never styled; keep styled trailing
+    # spaces because they carry e.g. background colour
+    return s.rstrip()
+
+
+def render_screen(sid, cols=DEFAULT_SCREEN_COLS, rows=DEFAULT_SCREEN_ROWS,
+                  keep_color=False):
     """Render the worker's current terminal screen via pyte.
 
     Returns dict with:
-      lines        list of `rows` strings, each up to `cols` chars wide
-                   (right-trimmed of trailing whitespace).
+      lines        list of `rows` strings, plain text (no ANSI codes).
+      lines_ansi   present only when keep_color=True: same rows with
+                   inline SGR sequences so you can pipe to a terminal
+                   that supports colour, or grep for `\\x1b[3?m` codes
+                   to disambiguate visually-distinct text (autosuggest
+                   ghost vs typed input, Claude UI colour-coding, ...).
       cursor       {"x": col, "y": row} -- where the worker's caret is.
       size         {"cols": ..., "rows": ...}.
-      bytes_fed    total payload bytes consumed (= spool size up to a
-                   complete final frame).
+      bytes_fed    total payload bytes consumed.
       frames_fed   number of frames consumed.
-      spool_end    absolute byte offset of the spool after the last
-                   complete frame (use as `since` for incremental
-                   stream-mode reads if you want to mix both).
+      spool_end    spool offset after the last complete frame.
     """
     screen, stream = _build_screen(cols, rows)
     path = _spool_path(sid)
     bytes_fed, frames_fed, end_off = _feed_spool(stream, path)
     lines = [line.rstrip() for line in screen.display]
-    return {
+    result = {
         "lines": lines,
         "cursor": {"x": screen.cursor.x, "y": screen.cursor.y},
         "size": {"cols": cols, "rows": rows},
@@ -268,12 +345,18 @@ def render_screen(sid, cols=DEFAULT_SCREEN_COLS, rows=DEFAULT_SCREEN_ROWS):
         "frames_fed": frames_fed,
         "spool_end": end_off,
     }
+    if keep_color:
+        result["lines_ansi"] = [_row_to_ansi(screen, y, cols) for y in range(rows)]
+    return result
 
 
 def screen_as_text(rendered):
     """Format a render_screen() result as a single newline-joined string
     suitable for printing to a terminal or piping to a Claude tool result.
+    Uses lines_ansi when present (keep_color=True), else plain lines.
     Trailing blank lines are kept (they're part of the visible screen)."""
+    if "lines_ansi" in rendered:
+        return "\n".join(rendered["lines_ansi"])
     return "\n".join(rendered["lines"])
 
 

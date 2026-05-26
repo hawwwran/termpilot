@@ -145,6 +145,12 @@ def handle_tail(argv):
                    help=f"screen mode: virtual terminal height (default {core.DEFAULT_SCREEN_ROWS}).")
     p.add_argument("--interval", type=float, default=0.5, metavar="SECS",
                    help="screen mode: redraw cadence in -f mode (default 0.5 s).")
+    p.add_argument("--color", choices=("auto", "always", "never"), default="auto",
+                   help="screen mode: emit ANSI colour codes. `auto` "
+                        "(default) = colour when stdout is a TTY; "
+                        "`always` = colour even when piped; `never` = "
+                        "plain text. Stream mode ignores this; use --raw "
+                        "there.")
     # Stream-mode-only flags
     p.add_argument("--since", type=int, default=None, metavar="OFFSET",
                    help="stream mode: resume from a prior `new_offset`. "
@@ -182,8 +188,13 @@ def _tail_screen(args):
             file=sys.stderr,
         )
         return 2
+    keep_color = (
+        args.color == "always"
+        or (args.color == "auto" and sys.stdout.isatty())
+    )
     if not args.follow:
-        r = core.render_screen(args.sid, cols=args.cols, rows=args.rows)
+        r = core.render_screen(args.sid, cols=args.cols, rows=args.rows,
+                               keep_color=keep_color)
         sys.stdout.write(core.screen_as_text(r) + "\n")
         return 0
     # Follow mode: incremental pyte feed + redraw loop.
@@ -205,8 +216,12 @@ def _tail_screen(args):
                 sys.stdout.write("\x1b[2J\x1b[H")  # clear + home
             else:
                 sys.stdout.write("\n--- screen @ {:.1f}s ---\n".format(_time.monotonic()))
-            for line in screen.display:
-                sys.stdout.write(line.rstrip() + "\n")
+            if keep_color:
+                for y in range(args.rows):
+                    sys.stdout.write(core._row_to_ansi(screen, y, args.cols) + "\n")
+            else:
+                for line in screen.display:
+                    sys.stdout.write(line.rstrip() + "\n")
             sys.stdout.flush()
             _time.sleep(args.interval)
     except KeyboardInterrupt:
@@ -246,17 +261,21 @@ def handle_screenshot(argv):
         description="One-shot pyte-rendered snapshot of a session's "
                     "current terminal screen. Identical to "
                     "`tp tail <sid> --mode screen` without -f, exposed as "
-                    "a top-level verb for discoverability. Note: pyte's "
-                    "rendered output is plain text - colour attributes are "
-                    "dropped. If the worker uses colour to distinguish "
-                    "content (zsh/fish autosuggest ghosts, Claude's UI "
-                    "colour-coding), supplement with "
-                    "`tp tail <sid> --mode stream --raw` which keeps ANSI "
-                    "codes inline.",
+                    "a top-level verb for discoverability. Colour is "
+                    "preserved when stdout is a TTY (auto) so the snapshot "
+                    "looks the same as the worker's screen - including "
+                    "the zsh/fish autosuggest ghost colour and Claude's UI "
+                    "colour-coding that distinguishes user input from "
+                    "suggestions.",
     )
     p.add_argument("sid", help="session id (12 hex chars; see `tp ls`).")
     p.add_argument("--cols", type=int, default=core.DEFAULT_SCREEN_COLS)
     p.add_argument("--rows", type=int, default=core.DEFAULT_SCREEN_ROWS)
+    p.add_argument("--color", choices=("auto", "always", "never"), default="auto",
+                   help="emit ANSI colour codes. `auto` = colour when "
+                        "stdout is a TTY (default); `always` = colour even "
+                        "when piped (useful for less -R); `never` = plain "
+                        "text only.")
     p.add_argument("--with-cursor", action="store_true",
                    help="also print cursor position (col,row) to stderr.")
     args = p.parse_args(argv)
@@ -270,8 +289,13 @@ def handle_screenshot(argv):
             file=sys.stderr,
         )
         return 2
+    keep_color = (
+        args.color == "always"
+        or (args.color == "auto" and sys.stdout.isatty())
+    )
     try:
-        r = core.render_screen(args.sid, cols=args.cols, rows=args.rows)
+        r = core.render_screen(args.sid, cols=args.cols, rows=args.rows,
+                               keep_color=keep_color)
     except RuntimeError as e:
         print(f"tp screenshot: {e}", file=sys.stderr)
         return 1

@@ -453,6 +453,43 @@ class TestRenderScreen(_CacheBaseFixture):
                     "frames_fed": 0, "spool_end": 0}
         self.assertEqual(core.screen_as_text(rendered), "a\nb\nc")
 
+    def test_keep_color_true_includes_lines_ansi(self):
+        self._skip_if_no_pyte()
+        with open(self.spool(), "wb") as f:
+            _write_frame(f, b"\x1b[31mRED\x1b[0m plain\r\n")
+        r = core.render_screen(self.sid, cols=20, rows=2, keep_color=True)
+        self.assertIn("lines_ansi", r)
+        # Plain "lines" still has no ANSI codes
+        self.assertEqual(r["lines"][0], "RED plain")
+        # lines_ansi has the red SGR somewhere
+        self.assertIn("\x1b[31m", r["lines_ansi"][0])
+        self.assertIn("RED", r["lines_ansi"][0])
+
+    def test_keep_color_false_omits_lines_ansi(self):
+        self._skip_if_no_pyte()
+        with open(self.spool(), "wb") as f:
+            _write_frame(f, b"\x1b[31mRED\x1b[0m\r\n")
+        r = core.render_screen(self.sid, cols=20, rows=2)
+        self.assertNotIn("lines_ansi", r)
+
+    def test_screen_as_text_prefers_lines_ansi_when_present(self):
+        rendered = {
+            "lines": ["plain"],
+            "lines_ansi": ["\x1b[31mplain\x1b[0m"],
+            "cursor": {"x": 0, "y": 0},
+            "size": {"cols": 5, "rows": 1},
+            "bytes_fed": 0, "frames_fed": 0, "spool_end": 0,
+        }
+        self.assertEqual(core.screen_as_text(rendered), "\x1b[31mplain\x1b[0m")
+
+    def test_hex_color_maps_to_truecolor_sgr(self):
+        self._skip_if_no_pyte()
+        # 38;2;215;119;87 = Claude's spinner orange (ff7755-ish hex)
+        with open(self.spool(), "wb") as f:
+            _write_frame(f, b"\x1b[38;2;215;119;87mx\x1b[0m")
+        r = core.render_screen(self.sid, cols=5, rows=1, keep_color=True)
+        self.assertIn("38;2;215;119;87", r["lines_ansi"][0])
+
 
 class TestReadOutput(_CacheBaseFixture):
 

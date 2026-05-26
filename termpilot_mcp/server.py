@@ -179,18 +179,22 @@ TOOLS = [
             "from non-TUI commands where in-place redraws aren't a "
             "factor.\n"
             "\n"
-            "Returns: lines (array of strings, one per row), cursor (x,y), "
-            "size (cols,rows), and bytes_fed/frames_fed/spool_end for "
+            "Returns: lines (array of plain strings, one per row); "
+            "lines_ansi (same rows with inline ANSI colour codes, only "
+            "present when keep_color=true); cursor (x,y); size "
+            "(cols,rows); and bytes_fed/frames_fed/spool_end for "
             "diagnostics. Default size is 200 cols x 20 rows - wider than "
             "most terminals, fits Claude's UI cleanly.\n"
             "\n"
-            "Caveat: pyte's rendered lines are plain text - colour "
-            "attributes are dropped. If the worker uses colour to "
-            "distinguish content the model needs to read apart (most "
-            "common: zsh/fish autosuggest ghost completions, Claude's "
-            "user-vs-suggestion colour-coding), supplement this with "
-            "`read_output strip_ansi=false` - it keeps the ANSI codes "
-            "inline so the model can grep for colour escapes."
+            "*** keep_color: pass true when colour carries meaning ***\n"
+            "Default false (plain text, cheap on tokens). Pass true when "
+            "the worker uses colour to distinguish content the model needs "
+            "to read apart: zsh/fish autosuggest ghost completions (dim "
+            "grey vs typed bright), Claude's user-vs-suggestion colour-"
+            "coding, compiler severity, syntax highlighting. With "
+            "keep_color=true the returned `lines_ansi` has SGR escapes "
+            "inline (`\\x1b[3?m` foreground, `\\x1b[1m` bold, etc.) so the "
+            "model can grep for colour codes to disambiguate."
         ),
         inputSchema={
             "type": "object",
@@ -205,6 +209,17 @@ TOOLS = [
                     "type": "integer",
                     "description": "Virtual terminal height. Default 20.",
                     "default": 20,
+                },
+                "keep_color": {
+                    "type": "boolean",
+                    "description": (
+                        "When true, also returns `lines_ansi` with inline "
+                        "ANSI/SGR codes that preserve colour, bold, etc. "
+                        "Default false. PASS TRUE when colour carries "
+                        "meaning (autosuggest ghosts, Claude UI colour-"
+                        "coding, severity highlighting)."
+                    ),
+                    "default": False,
                 },
             },
             "required": ["sid"],
@@ -469,6 +484,7 @@ async def _call_tool(name, arguments):
                 args["sid"],
                 cols=args.get("cols", 200),
                 rows=args.get("rows", 20),
+                keep_color=args.get("keep_color", False),
             )
             return _json_text(r)
         if name == "send_input":
