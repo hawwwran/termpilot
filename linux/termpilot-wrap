@@ -781,6 +781,28 @@ Lifecycle
                                          refuses to run from a git checkout)
   termpilot --test-connection            probe relay latency + server time
 
+Orchestrate another session on this machine (same-machine, no relay)
+  termpilot --activate-mcp               one-shot: create a venv, install the
+                                         `mcp` SDK, register with Claude Code
+                                         so any Claude session can drive
+                                         termpilot terminals on this machine
+  termpilot --deactivate-mcp [--purge]   reverse of --activate-mcp; --purge
+                                         also deletes the venv
+  termpilot ls                           list local termpilot sessions
+  termpilot tail <sid> [-f]              tail another session.
+                                         -f defaults to pyte-rendered screen
+                                         view (clean for TUI workers);
+                                         --mode stream for byte history.
+  termpilot screenshot <sid>             one-shot screen render via pyte
+  termpilot send <sid> "text"            type into another session.
+                                         --key NAME for special keys
+                                         (Esc, Tab, ShiftTab, Ctrl-C, Up, ...);
+                                         --list-keys for the full set.
+                                         --no-newline to skip the trailing Enter
+  termpilot wait <sid> --idle 20         block until target session is idle
+  termpilot mcp-serve                    run the stdio MCP server (invoked by
+                                         Claude Code; you don't run it by hand)
+
 Run a session
   termpilot                              spawn $SHELL through the wrapper
   termpilot bash                         spawn bash explicitly
@@ -805,6 +827,11 @@ Run a session
     --no-local         Don't accept input from the local terminal. Output
                        still prints locally; only the browser/phone can type
                        into the session. Useful when piping stdin or in CI.
+    --no-local-input   Don't read sibling-process input from the
+                       ~/.cache/termpilot/sid/<sid>/in.local file. By default
+                       the wrapper tails that file and writes new bytes to the
+                       PTY, which is how `tp send` and the termpilot_mcp
+                       server deliver input from another local process.
     --insecure         Skip TLS cert verification. For local dev only
                        (e.g. against `php -S` with a self-signed cert).
     --force            Start anyway if the per-cwd lock looks held by
@@ -1244,6 +1271,10 @@ def parse_run_args(argv):
                         "then ~/.config/termpilot/relay-secret).")
     p.add_argument("--title", default=None)
     p.add_argument("--no-local", action="store_true")
+    p.add_argument("--no-local-input", action="store_true",
+                   help="don't read sibling-process input from "
+                        "~/.cache/termpilot/sid/<sid>/in.local (used by "
+                        "termpilot_mcp / `tp send` for same-machine orchestration).")
     p.add_argument("--insecure", action="store_true",
                    help="skip TLS cert verification (for local dev with php -S)")
     p.add_argument("--force", action="store_true",
@@ -2035,6 +2066,75 @@ def cmd_run(argv):
                     return
                 next_seq = seq + 1
 
+    # ---- Local input poller -----------------------------------------------
+    # A second input ingress, parallel to the relay path above. Reads plain
+    # bytes appended to ~/.cache/termpilot/sid/<sid>/in.local by a sibling
+    # process on this machine and types them into the PTY. Used by the
+    # termpilot_mcp server and `tp send <sid> "..."` for same-machine
+    # orchestration (boss-Claude prompting worker-Claude) without a relay
+    # round-trip. Plain bytes; no crypto, no AAD seq, because (a) the file
+    # is mode 0600 in a user-private cache dir, same trust boundary as the
+    # token, and (b) the relay never sees these bytes so phone/browser
+    # views stay clean. Cursor file persists across wrapper restarts so a
+    # crash-recovery resume doesn't replay bytes already delivered.
+    def local_input_poller():
+        path = os.path.join(sid_cache_dir(sid), "in.local")
+        cursor_path = path + ".cursor"
+        try:
+            if not os.path.exists(path):
+                with open(path, "ab"):
+                    pass
+                try: os.chmod(path, 0o600)
+                except OSError: pass
+        except OSError:
+            return
+        # Starting cursor: persisted cursor if it exists (resume), else the
+        # current file size (fresh sid: don't replay stray bytes from an
+        # unrelated previous wrapper at the same path).
+        try:
+            with open(cursor_path, "rb") as cf:
+                buf = cf.read(8)
+                cursor = int.from_bytes(buf, "little") if len(buf) == 8 else 0
+        except OSError:
+            try: cursor = os.path.getsize(path)
+            except OSError: cursor = 0
+        log_event("local_input_ready", sid=sid, path=path, start_cursor=cursor)
+        while not stop.is_set():
+            try:
+                size = os.path.getsize(path)
+            except OSError:
+                if stop.wait(0.25): return
+                continue
+            if size < cursor:
+                # External truncation. Resync to the current end without
+                # replaying. The user clearly wants the file empty.
+                cursor = size
+            if size > cursor:
+                try:
+                    with open(path, "rb") as f:
+                        f.seek(cursor)
+                        new_bytes = f.read(size - cursor)
+                except OSError:
+                    new_bytes = b""
+                if new_bytes:
+                    try:
+                        os.write(master, new_bytes)
+                    except OSError:
+                        return
+                    cursor += len(new_bytes)
+                    try:
+                        tmp = cursor_path + ".tmp"
+                        with open(tmp, "wb") as cf:
+                            cf.write(cursor.to_bytes(8, "little"))
+                        os.replace(tmp, cursor_path)
+                        try: os.chmod(cursor_path, 0o600)
+                        except OSError: pass
+                    except OSError:
+                        pass
+                    log_event("local_input", sid=sid, n=len(new_bytes))
+            if stop.wait(0.1):
+                return
+
     # ---- Heartbeat ---------------------------------------------------------
     def heartbeat():
         while not stop.is_set():
@@ -2047,6 +2147,8 @@ def cmd_run(argv):
 
     threading.Thread(target=output_uploader, daemon=True).start()
     threading.Thread(target=input_poller, daemon=True).start()
+    if not args.no_local_input:
+        threading.Thread(target=local_input_poller, daemon=True).start()
     threading.Thread(target=heartbeat, daemon=True).start()
 
     # ---- Main loop ---------------------------------------------------------
@@ -2153,6 +2255,178 @@ def _safely(fn, *args, **kwargs):
 
 
 # ============================================================================
+#  termpilot_mcp activation: one-shot venv + Claude Code registration
+# ============================================================================
+#
+# Same probe pattern as the wrapper's own sys.path setup at startup: look
+# for termpilot_mcp/ next to the wrapper (release-zip flat layout) or one
+# level up (dev-tree layout where the wrapper sits in linux/).
+def _locate_termpilot_mcp() -> str | None:
+    for cand in (
+        os.path.join(SCRIPT_DIR, "termpilot_mcp"),
+        os.path.realpath(os.path.join(SCRIPT_DIR, "..", "termpilot_mcp")),
+    ):
+        if os.path.isdir(cand):
+            return cand
+    return None
+
+
+MCP_VENV_DEFAULT = os.path.expanduser("~/.local/share/termpilot/mcp-venv")
+
+
+def cmd_activate_mcp(argv):
+    """Provision a venv with the `mcp` SDK and register termpilot with Claude Code."""
+    p = argparse.ArgumentParser(
+        prog="termpilot --activate-mcp",
+        description="Set up the termpilot MCP server: create a Python venv "
+                    "with the `mcp` PyPI package, then register the server "
+                    "with Claude Code so any Claude session on this machine "
+                    "can orchestrate termpilot terminals.",
+    )
+    p.add_argument("--venv", default=MCP_VENV_DEFAULT,
+                   help="path for the MCP server's venv "
+                        f"(default: {MCP_VENV_DEFAULT})")
+    p.add_argument("--scope", choices=("user", "local", "project"), default="user",
+                   help="Claude Code MCP scope. user = machine-wide (default); "
+                        "local = current directory only; project = checked-in "
+                        ".mcp.json next to this dir.")
+    p.add_argument("--reinstall", action="store_true",
+                   help="reinstall the `mcp` package even if the venv already has it.")
+    args = p.parse_args(argv)
+
+    pkg_dir = _locate_termpilot_mcp()
+    if not pkg_dir:
+        sys.stderr.write(
+            "error: termpilot_mcp/ not found next to the wrapper.\n"
+            "  Looked at:\n"
+            f"    {os.path.join(SCRIPT_DIR, 'termpilot_mcp')}\n"
+            f"    {os.path.realpath(os.path.join(SCRIPT_DIR, '..', 'termpilot_mcp'))}\n"
+            "  Re-run install.sh (dev tree) or install-latest-version.sh "
+            "(release zip) to get the directory in place.\n"
+        )
+        return 1
+
+    claude_bin = shutil.which("claude")
+    if not claude_bin:
+        sys.stderr.write(
+            "error: the `claude` CLI is not on $PATH.\n"
+            "  Install Claude Code first (https://claude.ai/code), then re-run.\n"
+        )
+        return 1
+
+    venv_python = os.path.join(args.venv, "bin", "python")
+    venv_pip = os.path.join(args.venv, "bin", "pip")
+
+    if os.path.exists(venv_python):
+        print(f"venv already exists at {args.venv}")
+    else:
+        print(f"creating venv at {args.venv}")
+        try:
+            subprocess.run(
+                [sys.executable, "-m", "venv", args.venv],
+                check=True,
+            )
+        except (subprocess.CalledProcessError, FileNotFoundError) as e:
+            sys.stderr.write(
+                f"error: `python3 -m venv` failed: {e}\n"
+                "  On Debian/Ubuntu/Zorin you may need: sudo apt install python3-venv\n"
+            )
+            return 1
+
+    req_file = os.path.join(pkg_dir, "requirements.txt")
+    pip_args = [venv_pip, "install", "--quiet", "-r", req_file]
+    if args.reinstall:
+        pip_args.insert(2, "--force-reinstall")
+    print("installing the `mcp` Python SDK into the venv...")
+    try:
+        subprocess.run(pip_args, check=True)
+    except subprocess.CalledProcessError as e:
+        sys.stderr.write(f"error: pip install failed (exit {e.returncode})\n")
+        return 1
+
+    # Register with Claude Code. `claude mcp add` errors when the name is
+    # already registered, so we always try `remove` first (silently). The
+    # remove may fail when nothing is registered yet; ignore that.
+    _safely(subprocess.run,
+            [claude_bin, "mcp", "remove", "termpilot", "-s", args.scope],
+            capture_output=True)
+
+    wrap_real = os.path.realpath(__file__)
+    add_cmd = [
+        claude_bin, "mcp", "add", "termpilot", "-s", args.scope, "--",
+        venv_python, wrap_real, "mcp-serve",
+    ]
+    print(f"registering with Claude Code (scope: {args.scope})...")
+    try:
+        subprocess.run(add_cmd, check=True)
+    except subprocess.CalledProcessError as e:
+        sys.stderr.write(f"error: `claude mcp add` failed (exit {e.returncode})\n")
+        return 1
+
+    print()
+    print("termpilot MCP activated.")
+    print()
+    print("Try it: open a Claude Code session in any directory and ask")
+    print("  'are there any termpilot sessions running on this machine?'")
+    print("Boss should call list_sessions unprompted.")
+    print()
+    print(f"Uninstall with: termpilot --deactivate-mcp")
+    return 0
+
+
+def cmd_deactivate_mcp(argv):
+    """Unregister termpilot from Claude Code (and optionally remove its venv)."""
+    p = argparse.ArgumentParser(
+        prog="termpilot --deactivate-mcp",
+        description="Remove termpilot from Claude Code's MCP registry. "
+                    "By default the venv at ~/.local/share/termpilot/mcp-venv "
+                    "is left in place (cheap to keep, instant to reactivate); "
+                    "pass --purge to delete it too.",
+    )
+    p.add_argument("--scope", choices=("user", "local", "project"), default="user",
+                   help="MCP scope to unregister from (default: user).")
+    p.add_argument("--venv", default=MCP_VENV_DEFAULT,
+                   help=f"venv path (default: {MCP_VENV_DEFAULT})")
+    p.add_argument("--purge", action="store_true",
+                   help="also remove the venv directory.")
+    args = p.parse_args(argv)
+
+    claude_bin = shutil.which("claude")
+    if claude_bin:
+        r = subprocess.run(
+            [claude_bin, "mcp", "remove", "termpilot", "-s", args.scope],
+            capture_output=True, text=True,
+        )
+        if r.returncode == 0:
+            print("unregistered termpilot from Claude Code")
+        else:
+            print(
+                f"`claude mcp remove` returned {r.returncode}; "
+                "may not have been registered."
+            )
+            if r.stderr.strip():
+                print(f"  stderr: {r.stderr.strip()}")
+    else:
+        print("`claude` CLI not on $PATH; skipping unregister step")
+
+    if args.purge:
+        if os.path.isdir(args.venv):
+            try:
+                shutil.rmtree(args.venv)
+                print(f"removed venv at {args.venv}")
+            except OSError as e:
+                sys.stderr.write(f"error: could not remove {args.venv}: {e}\n")
+                return 1
+        else:
+            print(f"no venv to remove at {args.venv}")
+    else:
+        if os.path.isdir(args.venv):
+            print(f"venv kept at {args.venv} (use --purge to delete)")
+
+    return 0
+
+
+# ============================================================================
 #  Top-level dispatch
 # ============================================================================
 
@@ -2184,6 +2458,15 @@ def main(argv=None):
         return release_channel.cmd_update(argv[1:], SCRIPT_DIR)
     if argv and argv[0] in ("test-connection", "--test-connection"):
         return cmd_test_connection(argv[1:])
+    if argv and argv[0] in ("activate-mcp", "--activate-mcp"):
+        return cmd_activate_mcp(argv[1:])
+    if argv and argv[0] in ("deactivate-mcp", "--deactivate-mcp"):
+        return cmd_deactivate_mcp(argv[1:])
+    # termpilot_mcp subcommands; lazy-imported so they don't slow run-mode
+    # startup. See termpilot_mcp/cli.py.
+    if argv and argv[0] in ("ls", "tail", "screenshot", "send", "wait", "mcp-serve"):
+        from termpilot_mcp import cli as _mcp_cli
+        return _mcp_cli.main(argv)
     if argv and argv[0] == "run":
         return cmd_run(argv[1:])
     # No subcommand → run-mode (so `termpilot bash` works without `--`).

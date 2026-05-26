@@ -98,7 +98,10 @@ termpilot() {
         --clear-relay-secret|clear-relay-secret|\\
         --version|version|-V|\\
         --update|update|\\
-        --test-connection|test-connection)
+        --test-connection|test-connection|\\
+        --activate-mcp|activate-mcp|\\
+        --deactivate-mcp|deactivate-mcp|\\
+        ls|tail|screenshot|send|wait|mcp-serve)
             "$WRAP_PATH" "\$@"
             return
             ;;
@@ -174,9 +177,12 @@ _termpilot_complete() {
         --set-relay-url set-relay-url
         --get-relay-url get-relay-url
         --set-relay-secret set-relay-secret
-        --clear-relay-secret clear-relay-secret"
+        --clear-relay-secret clear-relay-secret
+        --activate-mcp activate-mcp
+        --deactivate-mcp deactivate-mcp
+        ls tail screenshot send wait mcp-serve"
     # Flags that ride alongside the program being wrapped.
-    local run_flags="--title --no-local --insecure --force --instance --relay --auth"
+    local run_flags="--title --no-local --no-local-input --insecure --force --instance --relay --auth"
 
     if [[ "$cur" == -* ]]; then
         COMPREPLY=( $(compgen -W "$verbs $run_flags" -- "$cur") )
@@ -255,7 +261,10 @@ function termpilot --description 'TermPilot session wrapper'
              --clear-relay-secret clear-relay-secret \\
              --version version -V \\
              --update update \\
-             --test-connection test-connection
+             --test-connection test-connection \\
+             --activate-mcp activate-mcp \\
+             --deactivate-mcp deactivate-mcp \\
+             ls tail screenshot send wait mcp-serve
             "\$wrap" \$argv
             return \$status
     end
@@ -308,9 +317,12 @@ complete -c termpilot -l set-relay-url   -d 'Persist the relay URL'           -r
 complete -c termpilot -l get-relay-url   -d 'Print the configured relay URL'
 complete -c termpilot -l set-relay-secret   -d 'Persist the relay Bearer token' -r
 complete -c termpilot -l clear-relay-secret -d 'Forget the relay Bearer token'
+complete -c termpilot -l activate-mcp       -d 'Install MCP server + register with Claude Code'
+complete -c termpilot -l deactivate-mcp     -d 'Unregister MCP server from Claude Code'
 
 complete -c termpilot -l title    -d 'Session title' -r
 complete -c termpilot -l no-local -d "Don't echo to local terminal"
+complete -c termpilot -l no-local-input -d "Don't read sibling-process input from in.local"
 complete -c termpilot -l insecure -d 'Allow self-signed relay cert'
 complete -c termpilot -l force    -d 'Override another wrapper holding the cwd lock'
 complete -c termpilot -l instance -d 'Override auto-derived instance name' -r
@@ -329,6 +341,14 @@ complete -c termpilot -n '__fish_is_first_token' -a set-relay-url      -d 'Persi
 complete -c termpilot -n '__fish_is_first_token' -a get-relay-url      -d 'Print the configured relay URL'
 complete -c termpilot -n '__fish_is_first_token' -a set-relay-secret   -d 'Persist the relay Bearer token'
 complete -c termpilot -n '__fish_is_first_token' -a clear-relay-secret -d 'Forget the relay Bearer token'
+complete -c termpilot -n '__fish_is_first_token' -a activate-mcp       -d 'Install + register MCP server'
+complete -c termpilot -n '__fish_is_first_token' -a deactivate-mcp     -d 'Unregister MCP server'
+complete -c termpilot -n '__fish_is_first_token' -a ls                 -d 'List local termpilot sessions'
+complete -c termpilot -n '__fish_is_first_token' -a tail               -d 'Tail another session output'
+complete -c termpilot -n '__fish_is_first_token' -a screenshot         -d 'Render another session screen via pyte'
+complete -c termpilot -n '__fish_is_first_token' -a send               -d 'Type into another session'
+complete -c termpilot -n '__fish_is_first_token' -a wait               -d 'Block until session idle / regex match'
+complete -c termpilot -n '__fish_is_first_token' -a mcp-serve          -d 'Run the stdio MCP server'
 
 # First positional argument that doesn't match a verb: a program to run.
 complete -c termpilot -n '__fish_is_first_token' -a '(__fish_complete_command)' -d 'Run program in PTY'

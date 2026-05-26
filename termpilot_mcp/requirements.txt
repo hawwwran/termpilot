@@ -1,0 +1,11 @@
+# Runtime dependencies for termpilot_mcp.
+# - mcp:  the MCP SDK, used by server.py (stdio JSON-RPC server).
+# - pyte: a VT100/xterm terminal emulator used by core.render_screen, the
+#         `tp screenshot` and `tp tail -f` paths, and the read_screen MCP
+#         tool. Mandatory: without it the screen-render path errors out.
+#         Byte-stream paths (tp tail --mode stream, read_output) still
+#         work without pyte, but the package is small (~700 KB pure
+#         Python) and worth the dep for the dramatic readability win on
+#         TUI workers (Claude, vim, htop, lazygit, ...).
+mcp>=1.20
+pyte>=0.8

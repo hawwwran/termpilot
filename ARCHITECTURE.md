@@ -269,6 +269,98 @@ GitHub.
   the pre-themes dark palette byte-identically, so the picker is purely
   additive — if `themes.js` fails to load the app still renders.
 
+### Same-machine orchestration: termpilot_mcp (landed 2026-05-26)
+
+A local CLI + stdio MCP server that lets one Claude Code session observe
+and drive another Claude running in a termpilot terminal on the same
+machine. Lives at [`termpilot_mcp/`](termpilot_mcp/). Linux only in v1.
+
+**Data plane** (no relay involved):
+
+- *Read*: external readers walk the wrapper's own output spool at
+  `~/.cache/termpilot/sid/<sid>/out.spool` directly. The spool is
+  plaintext, append-only, and never truncated in normal operation
+  (`OutputSpool.truncate()` exists but is unreferenced in the run path),
+  so a reader just tracks an absolute byte offset across calls.
+- *Write*: a per-session `in.local` file at the same path. The wrapper's
+  new `local_input_poller` daemon thread (parallel to the existing relay
+  `input_poller`) tails this file every ~100 ms and `os.write`s new
+  bytes to the PTY master fd. A persisted cursor (`in.local.cursor`)
+  survives wrapper restarts so crash-recovery doesn't replay delivered
+  bytes; on a fresh sid the cursor starts at the file's current size so
+  stray bytes from an unrelated previous wrapper at the same path don't
+  replay either.
+
+Same-machine orchestration works fully offline. Boss prompts never reach
+the relay, so they don't show up in the phone view. Disable with
+`--no-local-input` on the wrapper if you want the input file ignored
+entirely.
+
+**Trust boundary**: identical to the keyring. Boss has read access to
+the worker's plaintext spool because it runs as the same Linux user that
+owns `~/.cache/termpilot/` (mode 0700). It can type into the worker
+because it can append to a 0600 file in the same directory. There is no
+privilege escalation; a process running as your user can already read
+your keyring token, so reading the spool is the same trust boundary, and
+typing into the worker is no different from typing via `xdotool` into
+any of your terminals.
+
+**Surface**: 7 MCP tools wrap `termpilot_mcp/core.py`:
+
+- `list_sessions`, `read_output`, `send_input`, `send_signal`
+- `wait_for_idle`, `wait_for_output`, `tail_events`
+
+Tool descriptions are advertised at MCP-init time, so the boss reaches
+for them when the user says "watch another Claude" without per-project
+`CLAUDE.md` coaching. That eager discovery is the whole reason the
+design picked MCP over a plain CLI helper. The same 7 functions also surface as `tp ls / tail /
+send / wait` subcommands of the existing wrapper dispatcher (stdlib-only,
+no SDK dep) for shell use and debugging.
+
+**Server-side blocking primitives** (`wait_for_idle`, `wait_for_output`)
+are load-bearing for cost. Naïve polling from boss-Claude would burn
+through its context window with tool-call/response pairs every second;
+the server-side waiters compress one work cycle into one tool call.
+
+**The `mcp` Python SDK** is a runtime dep of `server.py` only.
+`core.py` and `cli.py` stay stdlib-only so the CLI works on a stock
+Python 3.9+ wrapper install without needing the MCP package. PEP 668
+makes the system Python externally-managed on modern Debian/Ubuntu, so
+install the SDK into a dedicated venv at
+`~/.local/share/termpilot/mcp-venv/` and point Claude Code at that
+venv's python. See `termpilot_mcp/README.md` for the exact recipe.
+
+**Footguns**:
+
+- The wrapper holds `fcntl.LOCK_EX` on `wrapper.lock`; the MCP must
+  only stat/read, never acquire.
+- `in.local` writes must use `"ab"` (O_APPEND). Writes ≤ 4 KB are
+  atomic across processes on Linux; larger writes need caller-side
+  serialization. Typical boss prompts are well under 1 KB so this is a
+  non-issue in practice.
+- Boss must not drive the worker's PTY size. Same rule as the phone
+  view: "view-only for size", SIGWINCH stays local-only.
+- MCP tool descriptions ride in every boss-Claude session's context
+  forever, so they're written tight (~550 chars instructions + 7 tools
+  averaging ~400 chars each = ~3.3 KB of constant overhead). Resist
+  the urge to expand them.
+
+**Future-work flags**:
+
+- *Windows port*. `windows/lib/resilience_win.py` already has the
+  matching cwd/instance/sid layout under
+  `%LOCALAPPDATA%\termpilot\cache\`. Port = add a `local_input_poller`
+  thread to `windows/termpilot-win-wrap.py` and swap `lib.keystore` for
+  `lib.keystore_win`. The MCP server itself is platform-agnostic.
+- *Resource URIs* (`termpilot://sessions/<sid>/output`) for declarative
+  MCP `resources` instead of imperative `read_output` calls.
+- *Real VT100 emulator pass* (via `pyte`) for snapshot-of-screen views
+  when the worker runs a full-screen TUI like vim. Current `_ansi_strip`
+  is good enough for shell prompts and streamed Claude output.
+- *pip-packageable distribution* (pyproject.toml, pipx-friendly) so
+  install becomes `pipx install termpilot-mcp` instead of the
+  user-managed venv recipe.
+
 ## Threat model
 
 | actor                       | sees plaintext? |
@@ -545,6 +637,16 @@ termpilot/
 │   │   └── vendor/            xterm.js + jsQR (verbatim, pinned)
 │   ├── config.example.php     copy → config.php; optional RELAY_SECRET + auto-GC tunables
 │   └── .htaccess              deny data/, logs/, config.php; PWA MIME types
+│
+├── termpilot_mcp/             same-machine orchestration data plane
+│   ├── core.py                pure-function data plane (list_sessions,
+│   │                          read_output, send_input via in.local,
+│   │                          send_signal, wait_for_idle, etc.)
+│   ├── cli.py                 `tp ls / tail / send / wait / mcp-serve`
+│   ├── server.py              stdio MCP server wrapping core.py
+│   ├── requirements.txt       runtime dep (`mcp` SDK, server.py only)
+│   ├── README.md              install, Claude Code config, prompt patterns
+│   └── tests/test_core.py     34 unit tests (no live wrapper needed)
 │
 ├── tools/
 │   ├── lib-ftp-host.sh        shared: resolves FTP host (env / file / prompt)

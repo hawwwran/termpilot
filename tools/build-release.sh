@@ -47,6 +47,20 @@ rsync -a \
     --exclude='*.pyc' \
     "$REPO_ROOT/shared" "$STAGE_DIR/"
 
+# Copy termpilot_mcp/ so `termpilot --activate-mcp` has the package to
+# install + register. Same probe pattern as shared/: the wrapper looks
+# for termpilot_mcp/ next to itself first, then one level up. Linux-only
+# in v1: the Windows wrapper doesn't have the local_input_poller thread
+# yet, so the MCP's send_input would have nowhere to write. Tests are
+# excluded from the zip.
+if [[ "$PLAT" == "linux" ]]; then
+    rsync -a \
+        --exclude='tests/' \
+        --exclude='__pycache__/' \
+        --exclude='*.pyc' \
+        "$REPO_ROOT/termpilot_mcp" "$STAGE_DIR/"
+fi
+
 # VERSION.json at repo root is canonical (CI rewrites it pre-build).
 cp "$REPO_ROOT/VERSION.json" "$STAGE_DIR/"
 

@@ -65,6 +65,28 @@ See [`ARCHITECTURE.md`](ARCHITECTURE.md). That's the canonical
 engineering reference — wire format, resilience design, release flow,
 operational footguns.
 
+## Orchestrating one Claude from another
+
+[`termpilot_mcp/`](termpilot_mcp/) ships a local CLI (`tp ls / tail /
+send / wait`) and a stdio MCP server that lets one Claude Code session
+observe and drive another Claude running inside a termpilot terminal on
+the same machine. Output reading goes through the wrapper's existing
+local spool (no relay round-trip); input sending writes to a per-session
+`in.local` file that a new wrapper thread tails and replays into the PTY
+(no relay, no phone-view leak). The CLI is stdlib-only and works against
+any wrapper; the MCP server needs the `mcp` PyPI package in a venv.
+
+One-shot setup:
+
+```sh
+termpilot --activate-mcp
+```
+
+creates the venv, installs `mcp`, and registers with Claude Code.
+`termpilot --deactivate-mcp` reverses it. See
+[`termpilot_mcp/README.md`](termpilot_mcp/README.md) for the by-hand
+install path, security notes, and orchestration prompt patterns.
+
 ## Repo layout
 
 ```
@@ -73,6 +95,7 @@ termpilot/
 ├── windows/                     Windows wrapper, installers
 ├── shared/                      crypto.py + release_channel.py (both wrappers)
 ├── relay/                       PHP backend + browser PWA (uploaded to your host)
+├── termpilot_mcp/               local orchestration data plane (CLI + MCP server)
 ├── tools/
 │   ├── deploy.sh                upload relay/ over FTPS
 │   ├── fetch-logs.sh            pull relay.log over FTP
