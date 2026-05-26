@@ -12,6 +12,7 @@ import os
 import re
 import signal as _signal
 import sys
+import time
 
 from termpilot_mcp import core
 
@@ -704,31 +705,51 @@ def _current_tty_instance():
     return tty.removeprefix("/dev/").replace("/", "-")
 
 
+def _last_out_seconds(sid):
+    """Seconds since the worker's output spool was last written. None if
+    no spool exists yet (brand-new wrapper)."""
+    if not sid:
+        return None
+    path = os.path.join(core.CACHE_BASE, "sid", sid, "out.spool")
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return None
+    delta = time.time() - mtime
+    return delta if delta >= 0 else 0.0
+
+
 def handle_gc(argv):
     p = argparse.ArgumentParser(
         prog="tp gc",
-        description="Garbage-collect forgotten termpilot wrappers. Lists "
-                    "candidates by default; pass --kill to actually "
-                    "terminate. The wrapper attached to the current "
-                    "terminal is excluded unless --include-current is "
-                    "given, so running `tp gc` from a terminal won't "
-                    "self-immolate.",
+        description="Inspect and (optionally) garbage-collect live "
+                    "termpilot wrappers. With no filter, lists every live "
+                    "wrapper with age and last-output time so you can spot "
+                    "the forgotten ones. Add --older-than DURATION to "
+                    "filter; add --kill to terminate the filtered set. The "
+                    "current terminal is excluded by default so `tp gc "
+                    "--kill` from a terminal won't self-immolate.",
         epilog="Examples:\n"
+               "  tp gc\n"
+               "    list all live wrappers with age + last-output columns\n"
                "  tp gc --older-than 2h\n"
-               "    list live wrappers older than 2 hours (no kill)\n"
+               "    filter to wrappers older than 2 hours (dry-run)\n"
                "  tp gc --older-than 24h --kill\n"
                "    terminate anything older than a day\n"
                "  tp gc --older-than 0s --kill --include-current\n"
                "    nuke EVERY live wrapper, this terminal included\n"
-               "  tp gc --older-than 1h --signal KILL\n"
-               "    use SIGKILL (default SIGTERM); use only if TERM didn't take\n",
+               "  tp gc --signal KILL --older-than 1h --kill\n"
+               "    use SIGKILL (default SIGTERM); only if TERM didn't take\n",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    p.add_argument("--older-than", required=True, metavar="DURATION",
-                   help="age threshold; required. Forms: 90s, 30m, 2h, 1d.")
+    p.add_argument("--older-than", metavar="DURATION", default=None,
+                   help="age threshold (forms: 90s, 30m, 2h, 1d). Required "
+                        "when --kill is given (safety: refuse to terminate "
+                        "the unfiltered set by accident). Pass "
+                        "--older-than 0s to mean 'all ages'.")
     p.add_argument("--kill", action="store_true",
-                   help="actually terminate matching wrappers. Default is "
-                        "dry-run (list only).")
+                   help="actually terminate matching wrappers (requires "
+                        "--older-than). Default is dry-run / list-only.")
     p.add_argument("--signal", default="TERM", metavar="NAME",
                    help="signal to send (without SIG prefix). Default: TERM. "
                         "Use KILL only if a polite TERM didn't take.")
@@ -739,11 +760,21 @@ def handle_gc(argv):
                    help="emit JSON instead of a table.")
     args = p.parse_args(argv)
 
-    try:
-        threshold = _parse_duration(args.older_than)
-    except ValueError as e:
-        sys.stderr.write(f"tp gc: {e}\n")
+    if args.kill and args.older_than is None:
+        sys.stderr.write(
+            "tp gc: --kill requires --older-than to avoid accidentally "
+            "terminating every wrapper.\n"
+            "       Pass --older-than 0s if you really want 'all ages'.\n"
+        )
         return 2
+
+    threshold = None
+    if args.older_than is not None:
+        try:
+            threshold = _parse_duration(args.older_than)
+        except ValueError as e:
+            sys.stderr.write(f"tp gc: {e}\n")
+            return 2
 
     try:
         sig = getattr(_signal, "SIG" + args.signal.upper())
@@ -758,28 +789,38 @@ def handle_gc(argv):
 
     all_sessions = core.list_sessions()
     candidates = []
+    excluded_current = 0
     for s in all_sessions:
         if not s.get("alive"):
             continue
         pid = s.get("pid")
         if not pid:
             continue
-        age = _process_age_seconds(pid)
-        if age is None or age < threshold:
-            continue
         if current_instance and s.get("instance") == current_instance:
+            excluded_current += 1
+            continue
+        age = _process_age_seconds(pid)
+        if age is None:
+            continue
+        if threshold is not None and age < threshold:
             continue
         s = dict(s)
         s["age_secs"] = age
+        s["last_out_secs"] = _last_out_seconds(s.get("sid"))
         candidates.append(s)
 
     candidates.sort(key=lambda s: s["age_secs"], reverse=True)
 
     if not candidates:
-        excl = (f" (excluding current terminal {current_instance})"
-                if current_instance else "")
-        print(f"No candidates: no live wrappers older than "
-              f"{args.older_than}{excl}.")
+        if threshold is not None:
+            excl = (f" (excluding current terminal {current_instance})"
+                    if current_instance else "")
+            print(f"No candidates: no live wrappers older than "
+                  f"{args.older_than}{excl}.")
+        else:
+            note = (f" (excluded current terminal {current_instance})"
+                    if excluded_current else "")
+            print(f"No live wrappers on this machine{note}.")
         return 0
 
     if args.json:
@@ -787,18 +828,28 @@ def handle_gc(argv):
     else:
         rows = []
         for s in candidates:
+            last_out = s["last_out_secs"]
             rows.append({
                 "age": _fmt_duration(s["age_secs"]),
+                "last_out": _fmt_duration(last_out) if last_out is not None else "-",
                 "pid": str(s["pid"]),
                 "instance": (s.get("instance") or "-")[:12],
                 "sid": s.get("sid") or "-",
                 "cwd": _short_cwd(s.get("cwd")),
             })
-        _print_table(rows, columns=["age", "pid", "instance", "sid", "cwd"])
+        _print_table(rows,
+                     columns=["age", "last_out", "pid", "instance", "sid", "cwd"])
+        if excluded_current and not args.include_current:
+            print(f"\n(excluded current terminal: {current_instance}; "
+                  "pass --include-current to include it)")
 
     if not args.kill:
-        print(f"\nDry-run: {len(candidates)} wrapper(s) would be killed "
-              f"with SIG{args.signal.upper()}. Pass --kill to act.")
+        if threshold is None:
+            print(f"\nListing only. Pass --older-than DURATION (and --kill) "
+                  "to terminate a subset.")
+        else:
+            print(f"\nDry-run: {len(candidates)} wrapper(s) would be killed "
+                  f"with SIG{args.signal.upper()}. Pass --kill to act.")
         return 0
 
     killed = 0
