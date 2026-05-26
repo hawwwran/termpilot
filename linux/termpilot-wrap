@@ -2313,14 +2313,91 @@ def _maybe_reexec_in_mcp_venv(argv):
     )
 
 
+# Per-client MCP registration recipes. Each spec describes how to add /
+# remove a server with that client's CLI. `scope` is only meaningful for
+# clients that support it (Claude Code does; Codex CLI doesn't expose one
+# in the canonical syntax). `manual_hint` is the fallback we print when
+# the canonical command fails - the user's client version may have a
+# different mcp subcommand or no mcp subcommand at all (older releases).
+def _mcp_client_specs(venv_python, wrap_real, claude_scope):
+    return [
+        {
+            "name": "Claude Code",
+            "bin_name": "claude",
+            "remove_argv": lambda binp: [
+                binp, "mcp", "remove", "termpilot", "-s", claude_scope,
+            ],
+            "add_argv": lambda binp: [
+                binp, "mcp", "add", "termpilot", "-s", claude_scope, "--",
+                venv_python, wrap_real, "mcp-serve",
+            ],
+            "scope_note": f" (scope: {claude_scope})",
+            "manual_hint": (
+                "  Manual setup: add to ~/.claude/mcp.json:\n"
+                "    {\n"
+                '      "mcpServers": {\n'
+                '        "termpilot": {\n'
+                f'          "command": "{venv_python}",\n'
+                f'          "args": ["{wrap_real}", "mcp-serve"]\n'
+                "        }\n"
+                "      }\n"
+                "    }\n"
+            ),
+        },
+        {
+            "name": "Codex CLI",
+            "bin_name": "codex",
+            "remove_argv": lambda binp: [binp, "mcp", "remove", "termpilot"],
+            "add_argv": lambda binp: [
+                binp, "mcp", "add", "termpilot", "--",
+                venv_python, wrap_real, "mcp-serve",
+            ],
+            "scope_note": "",
+            "manual_hint": (
+                "  Manual setup: add to ~/.codex/config.toml:\n"
+                "    [mcp_servers.termpilot]\n"
+                f'    command = "{venv_python}"\n'
+                f'    args = ["{wrap_real}", "mcp-serve"]\n'
+                "  (Run `codex mcp --help` to verify the exact subcommand\n"
+                "  name; older Codex versions may use a different schema.)\n"
+            ),
+        },
+    ]
+
+
+def _try_register(spec, binp):
+    """Attempt one client's add (after a silent remove). Returns
+    (status, detail) where status is 'registered' or 'failed'."""
+    _safely(subprocess.run, spec["remove_argv"](binp), capture_output=True)
+    r = subprocess.run(spec["add_argv"](binp), capture_output=True, text=True)
+    if r.returncode == 0:
+        return "registered", None
+    detail = (r.stderr or r.stdout or "").strip()
+    # Trim long error blobs to one line for the status table
+    first = detail.splitlines()[0] if detail else f"exit {r.returncode}"
+    return "failed", first[:200]
+
+
+def _try_unregister(spec, binp):
+    r = subprocess.run(spec["remove_argv"](binp), capture_output=True, text=True)
+    if r.returncode == 0:
+        return "unregistered", None
+    detail = (r.stderr or r.stdout or "").strip()
+    first = detail.splitlines()[0] if detail else f"exit {r.returncode}"
+    return "not-registered", first[:200]
+
+
 def cmd_activate_mcp(argv):
-    """Provision a venv with the `mcp` SDK and register termpilot with Claude Code."""
+    """Provision a venv with the `mcp` SDK and register termpilot with every
+    MCP-capable client found on $PATH (Claude Code, Codex CLI, or both)."""
     p = argparse.ArgumentParser(
         prog="termpilot --activate-mcp",
         description="Set up the termpilot MCP server: create a Python venv "
                     "with the `mcp` PyPI package, then register the server "
-                    "with Claude Code so any Claude session on this machine "
-                    "can orchestrate termpilot terminals.",
+                    "with every MCP-capable client found on $PATH (Claude "
+                    "Code, Codex CLI, or both). Skips any client that's not "
+                    "installed; reports per-client status. Idempotent - safe "
+                    "to re-run any time (e.g. after install.sh).",
     )
     p.add_argument("--venv", default=MCP_VENV_DEFAULT,
                    help="path for the MCP server's venv "
@@ -2328,7 +2405,11 @@ def cmd_activate_mcp(argv):
     p.add_argument("--scope", choices=("user", "local", "project"), default="user",
                    help="Claude Code MCP scope. user = machine-wide (default); "
                         "local = current directory only; project = checked-in "
-                        ".mcp.json next to this dir.")
+                        ".mcp.json. Ignored by Codex CLI (uses its own scope model).")
+    p.add_argument("--no-claude", action="store_true",
+                   help="skip Claude Code registration even if `claude` is found.")
+    p.add_argument("--no-codex", action="store_true",
+                   help="skip Codex CLI registration even if `codex` is found.")
     p.add_argument("--reinstall", action="store_true",
                    help="reinstall the `mcp` package even if the venv already has it.")
     args = p.parse_args(argv)
@@ -2342,14 +2423,6 @@ def cmd_activate_mcp(argv):
             f"    {os.path.realpath(os.path.join(SCRIPT_DIR, '..', 'termpilot_mcp'))}\n"
             "  Re-run install.sh (dev tree) or install-latest-version.sh "
             "(release zip) to get the directory in place.\n"
-        )
-        return 1
-
-    claude_bin = shutil.which("claude")
-    if not claude_bin:
-        sys.stderr.write(
-            "error: the `claude` CLI is not on $PATH.\n"
-            "  Install Claude Code first (https://claude.ai/code), then re-run.\n"
         )
         return 1
 
@@ -2383,71 +2456,118 @@ def cmd_activate_mcp(argv):
         sys.stderr.write(f"error: pip install failed (exit {e.returncode})\n")
         return 1
 
-    # Register with Claude Code. `claude mcp add` errors when the name is
-    # already registered, so we always try `remove` first (silently). The
-    # remove may fail when nothing is registered yet; ignore that.
-    _safely(subprocess.run,
-            [claude_bin, "mcp", "remove", "termpilot", "-s", args.scope],
-            capture_output=True)
-
     wrap_real = os.path.realpath(__file__)
-    add_cmd = [
-        claude_bin, "mcp", "add", "termpilot", "-s", args.scope, "--",
-        venv_python, wrap_real, "mcp-serve",
-    ]
-    print(f"registering with Claude Code (scope: {args.scope})...")
-    try:
-        subprocess.run(add_cmd, check=True)
-    except subprocess.CalledProcessError as e:
-        sys.stderr.write(f"error: `claude mcp add` failed (exit {e.returncode})\n")
-        return 1
+    specs = _mcp_client_specs(venv_python, wrap_real, args.scope)
+    skip_names = set()
+    if args.no_claude:
+        skip_names.add("claude")
+    if args.no_codex:
+        skip_names.add("codex")
 
     print()
+    print("MCP client registration:")
+    found_any = False
+    registered_any = False
+    failed_specs = []
+    for spec in specs:
+        bin_name = spec["bin_name"]
+        if bin_name in skip_names:
+            print(f"  - {spec['name']}: skipped (--no-{bin_name})")
+            continue
+        binp = shutil.which(bin_name)
+        if not binp:
+            print(f"  - {spec['name']}: not found (`{bin_name}` not on $PATH)")
+            continue
+        found_any = True
+        status, detail = _try_register(spec, binp)
+        if status == "registered":
+            print(f"  + {spec['name']}: registered{spec['scope_note']}")
+            registered_any = True
+        else:
+            print(f"  ! {spec['name']}: registration failed - {detail or '(no error message)'}")
+            failed_specs.append(spec)
+
+    if failed_specs:
+        print()
+        print("Failed registrations: manual setup instructions")
+        for spec in failed_specs:
+            print(f"\n{spec['name']}:")
+            sys.stdout.write(spec["manual_hint"])
+
+    print()
+    if not found_any:
+        print("No MCP-capable client detected.")
+        print("  Install Claude Code (https://claude.ai/code) or Codex CLI,")
+        print("  then re-run `termpilot --activate-mcp`. The venv is ready;")
+        print("  registration is the only step still pending.")
+        return 0
+    if not registered_any:
+        print("Venv is ready, but no client registration succeeded.")
+        print("  Use the manual setup hints above to wire termpilot in by hand.")
+        return 0
+
     print("termpilot MCP activated.")
     print()
-    print("Try it: open a Claude Code session in any directory and ask")
+    print("Try it: open one of the registered clients and ask")
     print("  'are there any termpilot sessions running on this machine?'")
     print("Boss should call list_sessions unprompted.")
     print()
-    print(f"Uninstall with: termpilot --deactivate-mcp")
+    print("Reverse with: termpilot --deactivate-mcp")
     return 0
 
 
 def cmd_deactivate_mcp(argv):
-    """Unregister termpilot from Claude Code (and optionally remove its venv)."""
+    """Unregister termpilot from every MCP-capable client found on $PATH
+    (and optionally remove its venv)."""
     p = argparse.ArgumentParser(
         prog="termpilot --deactivate-mcp",
-        description="Remove termpilot from Claude Code's MCP registry. "
-                    "By default the venv at ~/.local/share/termpilot/mcp-venv "
-                    "is left in place (cheap to keep, instant to reactivate); "
-                    "pass --purge to delete it too.",
+        description="Remove termpilot from every MCP-capable client found "
+                    "on $PATH (Claude Code, Codex CLI, or both). By default "
+                    "the venv at ~/.local/share/termpilot/mcp-venv is left "
+                    "in place (cheap to keep, instant to reactivate); pass "
+                    "--purge to delete it too.",
     )
     p.add_argument("--scope", choices=("user", "local", "project"), default="user",
-                   help="MCP scope to unregister from (default: user).")
+                   help="Claude Code scope to unregister from (default: user).")
     p.add_argument("--venv", default=MCP_VENV_DEFAULT,
                    help=f"venv path (default: {MCP_VENV_DEFAULT})")
+    p.add_argument("--no-claude", action="store_true",
+                   help="skip Claude Code unregistration.")
+    p.add_argument("--no-codex", action="store_true",
+                   help="skip Codex CLI unregistration.")
     p.add_argument("--purge", action="store_true",
                    help="also remove the venv directory.")
     args = p.parse_args(argv)
 
-    claude_bin = shutil.which("claude")
-    if claude_bin:
-        r = subprocess.run(
-            [claude_bin, "mcp", "remove", "termpilot", "-s", args.scope],
-            capture_output=True, text=True,
-        )
-        if r.returncode == 0:
-            print("unregistered termpilot from Claude Code")
+    venv_python = os.path.join(args.venv, "bin", "python")
+    wrap_real = os.path.realpath(__file__)
+    specs = _mcp_client_specs(venv_python, wrap_real, args.scope)
+    skip_names = set()
+    if args.no_claude:
+        skip_names.add("claude")
+    if args.no_codex:
+        skip_names.add("codex")
+
+    print("MCP client unregistration:")
+    for spec in specs:
+        bin_name = spec["bin_name"]
+        if bin_name in skip_names:
+            print(f"  - {spec['name']}: skipped (--no-{bin_name})")
+            continue
+        binp = shutil.which(bin_name)
+        if not binp:
+            print(f"  - {spec['name']}: not found (`{bin_name}` not on $PATH)")
+            continue
+        status, detail = _try_unregister(spec, binp)
+        if status == "unregistered":
+            print(f"  + {spec['name']}: unregistered")
         else:
             print(
-                f"`claude mcp remove` returned {r.returncode}; "
-                "may not have been registered."
+                f"  - {spec['name']}: not registered (or remove failed)"
+                + (f" - {detail}" if detail else "")
             )
-            if r.stderr.strip():
-                print(f"  stderr: {r.stderr.strip()}")
-    else:
-        print("`claude` CLI not on $PATH; skipping unregister step")
 
+    print()
     if args.purge:
         if os.path.isdir(args.venv):
             try:
