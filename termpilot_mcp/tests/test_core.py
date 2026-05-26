@@ -482,6 +482,43 @@ class TestRenderScreen(_CacheBaseFixture):
         }
         self.assertEqual(core.screen_as_text(rendered), "\x1b[31mplain\x1b[0m")
 
+    def test_since_spool_end_unchanged_short_circuit(self):
+        self._skip_if_no_pyte()
+        with open(self.spool(), "wb") as f:
+            _write_frame(f, b"hello\r\n")
+        r1 = core.render_screen(self.sid, cols=20, rows=2)
+        end = r1["spool_end"]
+        # Same offset, no new bytes: should short-circuit (no `lines`)
+        r2 = core.render_screen(self.sid, cols=20, rows=2, since_spool_end=end)
+        self.assertTrue(r2.get("unchanged"))
+        self.assertNotIn("lines", r2)
+        self.assertEqual(r2["spool_end"], end)
+
+    def test_since_spool_end_growth_renders_normally(self):
+        self._skip_if_no_pyte()
+        with open(self.spool(), "wb") as f:
+            _write_frame(f, b"first\r\n")
+        r1 = core.render_screen(self.sid, cols=20, rows=2)
+        with open(self.spool(), "ab") as f:
+            _write_frame(f, b"second\r\n")
+        r2 = core.render_screen(self.sid, cols=20, rows=2,
+                                 since_spool_end=r1["spool_end"])
+        self.assertNotIn("unchanged", r2)
+        self.assertIn("second", "\n".join(r2["lines"]))
+
+    def test_wait_secs_blocks_and_times_out(self):
+        self._skip_if_no_pyte()
+        with open(self.spool(), "wb") as f:
+            _write_frame(f, b"x\r\n")
+        r1 = core.render_screen(self.sid, cols=10, rows=2)
+        t0 = time.monotonic()
+        r2 = core.render_screen(self.sid, cols=10, rows=2,
+                                 since_spool_end=r1["spool_end"],
+                                 wait_secs=0.5)
+        elapsed = time.monotonic() - t0
+        self.assertGreaterEqual(elapsed, 0.45)
+        self.assertTrue(r2.get("unchanged"))
+
     def test_hex_color_maps_to_truecolor_sgr(self):
         self._skip_if_no_pyte()
         # 38;2;215;119;87 = Claude's spinner orange (ff7755-ish hex)

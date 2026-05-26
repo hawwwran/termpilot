@@ -317,24 +317,48 @@ def _row_to_ansi(screen, y, cols):
 
 
 def render_screen(sid, cols=DEFAULT_SCREEN_COLS, rows=DEFAULT_SCREEN_ROWS,
-                  keep_color=False):
+                  keep_color=False, since_spool_end=None, wait_secs=0.0):
     """Render the worker's current terminal screen via pyte.
 
+    Cheap-poll semantics: if `since_spool_end` is provided and the spool
+    hasn't grown past that offset, returns a tiny `{"unchanged": True,
+    "spool_end": ...}` response without running pyte at all. Combined
+    with `wait_secs > 0`, the call blocks server-side until either the
+    spool grows or the deadline elapses, so boss-Claude can poll cheaply
+    without burning context on identical screens.
+
     Returns dict with:
+      unchanged    present only when since_spool_end was set and the
+                   spool hasn't grown. Caller can short-circuit; no
+                   `lines` are emitted in this case (token-cheap).
       lines        list of `rows` strings, plain text (no ANSI codes).
       lines_ansi   present only when keep_color=True: same rows with
                    inline SGR sequences so you can pipe to a terminal
                    that supports colour, or grep for `\\x1b[3?m` codes
                    to disambiguate visually-distinct text (autosuggest
                    ghost vs typed input, Claude UI colour-coding, ...).
-      cursor       {"x": col, "y": row} -- where the worker's caret is.
+      cursor       {"x": col, "y": row} - where the worker's caret is.
       size         {"cols": ..., "rows": ...}.
       bytes_fed    total payload bytes consumed.
       frames_fed   number of frames consumed.
       spool_end    spool offset after the last complete frame.
     """
-    screen, stream = _build_screen(cols, rows)
     path = _spool_path(sid)
+    deadline = time.monotonic() + max(0.0, wait_secs)
+    while True:
+        current_size = _safe_getsize(path) or 0
+        if since_spool_end is not None and current_size == since_spool_end:
+            if time.monotonic() >= deadline:
+                return {
+                    "unchanged": True,
+                    "spool_end": current_size,
+                    "size": {"cols": cols, "rows": rows},
+                }
+            time.sleep(0.25)
+            continue
+        break
+
+    screen, stream = _build_screen(cols, rows)
     bytes_fed, frames_fed, end_off = _feed_spool(stream, path)
     lines = [line.rstrip() for line in screen.display]
     result = {
@@ -354,7 +378,9 @@ def screen_as_text(rendered):
     """Format a render_screen() result as a single newline-joined string
     suitable for printing to a terminal or piping to a Claude tool result.
     Uses lines_ansi when present (keep_color=True), else plain lines.
-    Trailing blank lines are kept (they're part of the visible screen)."""
+    Returns "" for an `unchanged` short-circuit response (nothing to print)."""
+    if rendered.get("unchanged"):
+        return ""
     if "lines_ansi" in rendered:
         return "\n".join(rendered["lines_ansi"])
     return "\n".join(rendered["lines"])

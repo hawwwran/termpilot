@@ -184,7 +184,22 @@ TOOLS = [
             "present when keep_color=true); cursor (x,y); size "
             "(cols,rows); and bytes_fed/frames_fed/spool_end for "
             "diagnostics. Default size is 200 cols x 20 rows - wider than "
-            "most terminals, fits Claude's UI cleanly.\n"
+            "most terminals, fits Claude's UI cleanly. For high-volume "
+            "scrolling content (code diffs, test output, git log), bump "
+            "rows (e.g. rows=80) so older lines stay visible before "
+            "they scroll past the top of the virtual screen.\n"
+            "\n"
+            "*** cheap polling: since_spool_end + wait_secs ***\n"
+            "Pass since_spool_end (the spool_end you got from a previous "
+            "call) to short-circuit when nothing's changed. If the spool "
+            "hasn't grown, the response is just "
+            "{unchanged:true, spool_end:X} - no `lines` re-rendered, no "
+            "tokens wasted on identical content. Combine with wait_secs>0 "
+            "to block server-side until the worker produces something or "
+            "the timeout fires. This is the cheap polling primitive: "
+            "boss-Claude can call read_screen(sid, since_spool_end=last, "
+            "wait_secs=30) in a loop and only burn tokens when there's "
+            "actually new content to read.\n"
             "\n"
             "*** keep_color: pass true when colour carries meaning ***\n"
             "Default false (plain text, cheap on tokens). Pass true when "
@@ -220,6 +235,27 @@ TOOLS = [
                         "coding, severity highlighting)."
                     ),
                     "default": False,
+                },
+                "since_spool_end": {
+                    "type": ["integer", "null"],
+                    "description": (
+                        "The `spool_end` value from a previous read_screen "
+                        "call. Server returns {unchanged:true} if the "
+                        "spool hasn't grown past this offset - avoids "
+                        "re-rendering identical screens. Default null."
+                    ),
+                    "default": None,
+                },
+                "wait_secs": {
+                    "type": "number",
+                    "description": (
+                        "If since_spool_end is set and the spool is still "
+                        "at that offset, block server-side for up to this "
+                        "many seconds waiting for new content. Default 0 "
+                        "(don't block). Pair with since_spool_end for "
+                        "cheap long-poll loops."
+                    ),
+                    "default": 0.0,
                 },
             },
             "required": ["sid"],
@@ -485,6 +521,8 @@ async def _call_tool(name, arguments):
                 cols=args.get("cols", 200),
                 rows=args.get("rows", 20),
                 keep_color=args.get("keep_color", False),
+                since_spool_end=args.get("since_spool_end"),
+                wait_secs=args.get("wait_secs", 0.0),
             )
             return _json_text(r)
         if name == "send_input":
