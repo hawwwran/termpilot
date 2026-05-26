@@ -71,17 +71,36 @@ TOOLS = [
     types.Tool(
         name="list_sessions",
         description=(
-            "List termpilot terminal sessions on this machine. Returns each "
-            "session's sid (12-char id used by every other tool), cwd, pid, "
-            "alive flag, and local_in flag. Call this first when the user "
-            "wants you to watch or orchestrate another Claude; the sid is "
-            "the handle for every other tool here. local_in='no' means that "
-            "session is on an older termpilot build that can't accept "
-            "`send_input` until it restarts."
+            "List LIVE termpilot terminal sessions on this machine (stale "
+            "entries from dead wrappers filtered out by default). Returns "
+            "each session's sid (12-char id used by every other tool), "
+            "cwd, pid, alive flag, and local_in flag. Call this first "
+            "when the user wants you to watch or orchestrate another "
+            "Claude; the sid is the handle for every other tool here. "
+            "local_in='no' means that session is on an older termpilot "
+            "build that can't accept `send_input` until it restarts.\n"
+            "\n"
+            "Pass include_stale=true if you need recently-exited sessions "
+            "too (e.g. the user asks 'what was the worker doing before it "
+            "crashed?' - the spool survives the wrapper exit and you can "
+            "read_history on a stale sid). Don't pass it by default: "
+            "stale entries are noise for orchestration since you can't "
+            "send_input or send_signal to a dead wrapper."
         ),
         inputSchema={
             "type": "object",
-            "properties": {},
+            "properties": {
+                "include_stale": {
+                    "type": "boolean",
+                    "description": (
+                        "Include sessions whose wrapper process has "
+                        "exited but whose cache dir still exists "
+                        "(spool readable, no input possible). "
+                        "Default false."
+                    ),
+                    "default": False,
+                },
+            },
             "additionalProperties": False,
         },
     ),
@@ -630,7 +649,10 @@ async def _call_tool(name, arguments):
     args = arguments or {}
     try:
         if name == "list_sessions":
-            return _json_text(core.list_sessions())
+            sessions = core.list_sessions()
+            if not args.get("include_stale", False):
+                sessions = [s for s in sessions if s.get("alive")]
+            return _json_text(sessions)
         if name == "read_output":
             r = core.read_output(
                 args["sid"],
