@@ -1660,7 +1660,10 @@ def _print_startup_banner(sid: str, spool_count: int, spool_bytes: int) -> None:
     # spotting zombie accumulation (closed-tab-but-process-still-alive).
     try:
         other_live = sum(1 for e in collect_wrapper_inventory() if e.get("alive"))
-    except Exception:
+    except Exception:  # noqa: BLE001
+        # collect_wrapper_inventory walks /proc + reads active.json files;
+        # OSError (permissions), JSON errors, or stat races are all plausible.
+        # The banner must never block startup, so swallow everything.
         other_live = None
     if other_live is not None:
         if other_live == 0:
