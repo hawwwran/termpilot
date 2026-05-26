@@ -828,9 +828,14 @@ def handle_gc(argv):
             continue
         last_out = _last_out_seconds(s.get("sid"))
         if threshold_stale is not None:
-            # Worker with no spool yet is treated as "infinitely stale":
-            # nothing has ever been written. Belongs in the stale set.
-            stale = last_out if last_out is not None else float("inf")
+            # When there's no spool yet, "last output" is bounded above
+            # by the wrapper's own age: a wrapper that started 5s ago and
+            # has produced nothing has been silent for at most 5s, not
+            # forever. Using `age` as the staleness lets fresh wrappers
+            # legitimately fail the stale-for check until they've existed
+            # long enough; the earlier `float("inf")` fallback would kill
+            # a 5-second-old wrapper under `--stale-for 1d`.
+            stale = last_out if last_out is not None else age
             if stale < threshold_stale:
                 continue
         s = dict(s)
