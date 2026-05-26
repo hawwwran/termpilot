@@ -458,9 +458,13 @@ def render_history(sid, cols=DEFAULT_SCREEN_COLS, rows=DEFAULT_SCREEN_ROWS,
                      with inline SGR codes.
       cursor         {"x": col, "y": row} where the caret is now.
       size           {"cols": ..., "rows": ..., "scrollback": ...}.
-      truncated      true if older history fell off the top (the spool
-                     produced more rows of transcript than scrollback
-                     could hold). False = boss has the full history.
+      truncated      true if the history deque is at capacity. This is
+                     an upper bound on "lines were dropped" - at the
+                     exact moment the deque first fills, no drops have
+                     happened yet, so the flag may be set for one render
+                     before drops actually begin. False = boss has the
+                     full history; True = boss should bump scrollback
+                     if they want to be sure nothing was dropped.
       bytes_fed      total payload bytes consumed.
       frames_fed     number of frames consumed.
       spool_end      spool offset after the last complete frame.
