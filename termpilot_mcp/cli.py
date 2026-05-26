@@ -73,21 +73,33 @@ def _install_sigpipe_default():
 def handle_ls(argv):
     p = argparse.ArgumentParser(
         prog="tp ls",
-        description="List termpilot wrappers registered on this machine.",
+        description="List live termpilot wrappers on this machine. Stale "
+                    "entries (wrapper process exited but the cache dir is "
+                    "still present) are hidden by default; pass --all to "
+                    "include them.",
     )
     p.add_argument("--json", action="store_true",
                    help="emit JSON instead of a table (for scripting / MCP).")
-    p.add_argument("--alive", action="store_true",
-                   help="show only sessions whose wrapper process is currently alive.")
+    p.add_argument("--all", action="store_true",
+                   help="show all known sessions including stale entries "
+                        "whose wrapper process has exited. Default: live only.")
     args = p.parse_args(argv)
-    sessions = core.list_sessions()
-    if args.alive:
-        sessions = [s for s in sessions if s.get("alive")]
+    all_sessions = core.list_sessions()
+    if args.all:
+        sessions = all_sessions
+        stale_hidden = 0
+    else:
+        sessions = [s for s in all_sessions if s.get("alive")]
+        stale_hidden = len(all_sessions) - len(sessions)
     if args.json:
         print(json.dumps(sessions, indent=2, default=str))
         return 0
     if not sessions:
-        print("No termpilot sessions on this machine.")
+        if stale_hidden:
+            print(f"No live termpilot sessions on this machine "
+                  f"({stale_hidden} stale hidden; pass --all to show).")
+        else:
+            print("No termpilot sessions on this machine.")
         return 0
     rows = []
     for s in sessions:
@@ -100,7 +112,12 @@ def handle_ls(argv):
             "local_in": "yes" if s.get("in_local_size") is not None else "no",
             "cwd": _short_cwd(s.get("cwd")),
         })
-    _print_table(rows, columns=["instance", "sid", "pid", "alive", "spool", "local_in", "cwd"])
+    cols = ["instance", "sid", "pid", "spool", "local_in", "cwd"]
+    if args.all:
+        cols.insert(3, "alive")  # only useful when stale entries are visible
+    _print_table(rows, columns=cols)
+    if stale_hidden:
+        print(f"\n({stale_hidden} stale entries hidden; pass --all to show)")
     return 0
 
 
