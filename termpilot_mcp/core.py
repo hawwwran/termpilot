@@ -347,7 +347,10 @@ def render_screen(sid, cols=DEFAULT_SCREEN_COLS, rows=DEFAULT_SCREEN_ROWS,
     deadline = time.monotonic() + max(0.0, wait_secs)
     while True:
         current_size = _safe_getsize(path) or 0
-        if since_spool_end is not None and current_size == since_spool_end:
+        # `<=` so external truncation (file shrank below since_spool_end)
+        # also short-circuits as "no new content" rather than tripping
+        # the render path on a smaller-than-expected spool.
+        if since_spool_end is not None and current_size <= since_spool_end:
             if time.monotonic() >= deadline:
                 return {
                     "unchanged": True,
