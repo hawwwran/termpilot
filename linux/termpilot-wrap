@@ -797,6 +797,9 @@ Orchestrate another session on this machine (same-machine, no relay)
   termpilot transcript <sid>             full session history via pyte
                                          scrollback (audit-style view of
                                          everything the worker has done)
+  termpilot gc --older-than 2h           garbage-collect forgotten wrappers
+                                         (dry-run; add --kill to act). Current
+                                         terminal is excluded by default.
   termpilot send <sid> "text"            type into another session.
                                          --key NAME for special keys
                                          (Esc, Tab, ShiftTab, Ctrl-C, Up, ...);
@@ -2625,7 +2628,7 @@ def main(argv=None):
     # startup. See termpilot_mcp/cli.py. We re-exec under the activate-mcp
     # venv first (if it exists) so `import mcp` / `import pyte` resolve
     # without the user juggling PYTHONPATH or interpreter paths.
-    if argv and argv[0] in ("ls", "tail", "screenshot", "transcript",
+    if argv and argv[0] in ("ls", "tail", "screenshot", "transcript", "gc",
                             "send", "wait", "mcp-serve"):
         _maybe_reexec_in_mcp_venv(argv)
         from termpilot_mcp import cli as _mcp_cli

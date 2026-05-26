@@ -101,7 +101,7 @@ termpilot() {
         --test-connection|test-connection|\\
         --activate-mcp|activate-mcp|\\
         --deactivate-mcp|deactivate-mcp|\\
-        ls|tail|screenshot|transcript|send|wait|mcp-serve)
+        ls|tail|screenshot|transcript|gc|send|wait|mcp-serve)
             "$WRAP_PATH" "\$@"
             return
             ;;
@@ -180,7 +180,7 @@ _termpilot_complete() {
         --clear-relay-secret clear-relay-secret
         --activate-mcp activate-mcp
         --deactivate-mcp deactivate-mcp
-        ls tail screenshot transcript send wait mcp-serve"
+        ls tail screenshot transcript gc send wait mcp-serve"
     # Flags that ride alongside the program being wrapped.
     local run_flags="--title --no-local --no-local-input --insecure --force --instance --relay --auth"
 
@@ -264,7 +264,7 @@ function termpilot --description 'TermPilot session wrapper'
              --test-connection test-connection \\
              --activate-mcp activate-mcp \\
              --deactivate-mcp deactivate-mcp \\
-             ls tail screenshot transcript send wait mcp-serve
+             ls tail screenshot transcript gc send wait mcp-serve
             "\$wrap" \$argv
             return \$status
     end
@@ -347,6 +347,7 @@ complete -c termpilot -n '__fish_is_first_token' -a ls                 -d 'List 
 complete -c termpilot -n '__fish_is_first_token' -a tail               -d 'Tail another session output'
 complete -c termpilot -n '__fish_is_first_token' -a screenshot         -d 'Render another session screen via pyte'
 complete -c termpilot -n '__fish_is_first_token' -a transcript         -d 'Dump full session history via pyte scrollback'
+complete -c termpilot -n '__fish_is_first_token' -a gc                 -d 'Garbage-collect forgotten wrappers by age'
 complete -c termpilot -n '__fish_is_first_token' -a send               -d 'Type into another session'
 complete -c termpilot -n '__fish_is_first_token' -a wait               -d 'Block until session idle / regex match'
 complete -c termpilot -n '__fish_is_first_token' -a mcp-serve          -d 'Run the stdio MCP server'

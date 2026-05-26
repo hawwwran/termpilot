@@ -640,6 +640,182 @@ def handle_transcript(argv):
 
 
 # ---------------------------------------------------------------------------
+# tp gc - garbage-collect forgotten wrappers
+# ---------------------------------------------------------------------------
+# Built because of an upstream Blackbox bug: closing a tab visually
+# doesn't always release the underlying PTY, so the bash + termpilot
+# inside keep running even though nothing's at the keyboard. tp gc gives
+# the user a manual lever to clean these up by age. Dry-run by default;
+# --kill required to actually terminate anything.
+
+_DURATION_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([smhd]?)\s*$")
+_DURATION_MULT = {"s": 1, "": 1, "m": 60, "h": 3600, "d": 86400}
+
+
+def _parse_duration(s):
+    m = _DURATION_RE.match(s)
+    if not m:
+        raise ValueError(
+            f"invalid duration {s!r}; expected forms: 90s, 30m, 2h, 1d"
+        )
+    return float(m.group(1)) * _DURATION_MULT[m.group(2)]
+
+
+def _fmt_duration(secs):
+    if secs < 60:
+        return f"{int(secs)}s"
+    if secs < 3600:
+        return f"{int(secs // 60)}m"
+    if secs < 86400:
+        h, rem = divmod(int(secs), 3600)
+        return f"{h}h{rem // 60}m"
+    d, rem = divmod(int(secs), 86400)
+    return f"{d}d{rem // 3600}h"
+
+
+def _process_age_seconds(pid):
+    """Age in seconds since the process started, from /proc.
+
+    /proc/<pid>/stat field 22 (starttime) is clock-ticks since boot;
+    /proc/uptime is seconds since boot. Comm field is parenthesised and
+    can contain spaces/parens itself, so we anchor on the last `)`.
+    """
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as f:
+            data = f.read()
+        end = data.rindex(b")")
+        after = data[end + 2:].split()
+        starttime_ticks = int(after[19])
+        clock_ticks = os.sysconf("SC_CLK_TCK")
+        with open("/proc/uptime") as f:
+            uptime = float(f.read().split()[0])
+        return uptime - (starttime_ticks / clock_ticks)
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _current_tty_instance():
+    """Return the instance label the wrapper would use for the current TTY
+    (e.g. 'pts-7'), or None if stdin isn't a TTY."""
+    try:
+        tty = os.ttyname(0)
+    except OSError:
+        return None
+    return tty.removeprefix("/dev/").replace("/", "-")
+
+
+def handle_gc(argv):
+    p = argparse.ArgumentParser(
+        prog="tp gc",
+        description="Garbage-collect forgotten termpilot wrappers. Lists "
+                    "candidates by default; pass --kill to actually "
+                    "terminate. The wrapper attached to the current "
+                    "terminal is excluded unless --include-current is "
+                    "given, so running `tp gc` from a terminal won't "
+                    "self-immolate.",
+        epilog="Examples:\n"
+               "  tp gc --older-than 2h\n"
+               "    list live wrappers older than 2 hours (no kill)\n"
+               "  tp gc --older-than 24h --kill\n"
+               "    terminate anything older than a day\n"
+               "  tp gc --older-than 0s --kill --include-current\n"
+               "    nuke EVERY live wrapper, this terminal included\n"
+               "  tp gc --older-than 1h --signal KILL\n"
+               "    use SIGKILL (default SIGTERM); use only if TERM didn't take\n",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p.add_argument("--older-than", required=True, metavar="DURATION",
+                   help="age threshold; required. Forms: 90s, 30m, 2h, 1d.")
+    p.add_argument("--kill", action="store_true",
+                   help="actually terminate matching wrappers. Default is "
+                        "dry-run (list only).")
+    p.add_argument("--signal", default="TERM", metavar="NAME",
+                   help="signal to send (without SIG prefix). Default: TERM. "
+                        "Use KILL only if a polite TERM didn't take.")
+    p.add_argument("--include-current", action="store_true",
+                   help="also consider the wrapper attached to this terminal "
+                        "(default: excluded to avoid self-immolation).")
+    p.add_argument("--json", action="store_true",
+                   help="emit JSON instead of a table.")
+    args = p.parse_args(argv)
+
+    try:
+        threshold = _parse_duration(args.older_than)
+    except ValueError as e:
+        sys.stderr.write(f"tp gc: {e}\n")
+        return 2
+
+    try:
+        sig = getattr(_signal, "SIG" + args.signal.upper())
+    except AttributeError:
+        sys.stderr.write(
+            f"tp gc: unknown signal name {args.signal!r}. "
+            "Try TERM, INT, HUP, KILL.\n"
+        )
+        return 2
+
+    current_instance = None if args.include_current else _current_tty_instance()
+
+    all_sessions = core.list_sessions()
+    candidates = []
+    for s in all_sessions:
+        if not s.get("alive"):
+            continue
+        pid = s.get("pid")
+        if not pid:
+            continue
+        age = _process_age_seconds(pid)
+        if age is None or age < threshold:
+            continue
+        if current_instance and s.get("instance") == current_instance:
+            continue
+        s = dict(s)
+        s["age_secs"] = age
+        candidates.append(s)
+
+    candidates.sort(key=lambda s: s["age_secs"], reverse=True)
+
+    if not candidates:
+        excl = (f" (excluding current terminal {current_instance})"
+                if current_instance else "")
+        print(f"No candidates: no live wrappers older than "
+              f"{args.older_than}{excl}.")
+        return 0
+
+    if args.json:
+        print(json.dumps(candidates, indent=2, default=str))
+    else:
+        rows = []
+        for s in candidates:
+            rows.append({
+                "age": _fmt_duration(s["age_secs"]),
+                "pid": str(s["pid"]),
+                "instance": (s.get("instance") or "-")[:12],
+                "sid": s.get("sid") or "-",
+                "cwd": _short_cwd(s.get("cwd")),
+            })
+        _print_table(rows, columns=["age", "pid", "instance", "sid", "cwd"])
+
+    if not args.kill:
+        print(f"\nDry-run: {len(candidates)} wrapper(s) would be killed "
+              f"with SIG{args.signal.upper()}. Pass --kill to act.")
+        return 0
+
+    killed = 0
+    failed = []
+    for s in candidates:
+        try:
+            os.kill(s["pid"], sig)
+            killed += 1
+        except OSError as e:
+            failed.append((s["pid"], str(e)))
+    print(f"\nSent SIG{args.signal.upper()} to {killed}/{len(candidates)} wrapper(s).")
+    for pid, err in failed:
+        sys.stderr.write(f"  pid {pid}: {err}\n")
+    return 0 if not failed else 1
+
+
+# ---------------------------------------------------------------------------
 # Top-level dispatcher (for `python -m termpilot_mcp.cli ...`)
 # ---------------------------------------------------------------------------
 
@@ -648,6 +824,7 @@ _HANDLERS = {
     "tail": handle_tail,
     "screenshot": handle_screenshot,
     "transcript": handle_transcript,
+    "gc": handle_gc,
     "send": handle_send,
     "wait": handle_wait,
     "mcp-serve": handle_mcp_serve,
@@ -663,6 +840,7 @@ def _print_usage(out=sys.stdout):
         "  tail <sid>         Watch a session (screen mode default).\n"
         "  screenshot <sid>   One-shot pyte-rendered snapshot of the worker's screen.\n"
         "  transcript <sid>   Full session history via pyte scrollback (audit view).\n"
+        "  gc                 Garbage-collect forgotten wrappers by age.\n"
         "  send <sid> <text>  Type text into a session (local; no relay).\n"
         "  wait <sid>         Block until session is idle or a pattern matches.\n"
         "  mcp-serve          Run the stdio MCP server (called by Claude Code).\n"
