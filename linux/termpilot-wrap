@@ -1650,8 +1650,30 @@ def _print_startup_banner(sid: str, spool_count: int, spool_bytes: int) -> None:
     DIM = "\033[2m"
     RESET = "\033[0m"
     TITLE = "\033[1;36m"
+    WARN = "\033[1;33m"
     pad = " " * len("termpilot ")
     lines = [f"{TITLE}termpilot{RESET} {DIM}session {RESET}{sid}"]
+
+    # Show how many wrappers are already running. This banner prints
+    # BEFORE write_active_json for the new session, so the count is
+    # "other live wrappers" - directly the signal the user wants for
+    # spotting zombie accumulation (closed-tab-but-process-still-alive).
+    try:
+        other_live = sum(1 for e in collect_wrapper_inventory() if e.get("alive"))
+    except Exception:
+        other_live = None
+    if other_live is not None:
+        if other_live == 0:
+            lines.append(f"{pad}{DIM}wrappers{RESET} (you're the first on this machine)")
+        elif other_live < 3:
+            lines.append(f"{pad}{DIM}wrappers{RESET} {other_live} other live")
+        else:
+            lines.append(
+                f"{pad}{DIM}wrappers{RESET} "
+                f"{WARN}{other_live} other live{RESET}"
+                f" {DIM}(possible zombies; run `tp gc` to inspect){RESET}"
+            )
+
     if spool_count:
         lines.append(
             f"{pad}{DIM}spool   {RESET}replaying {spool_count} chunk(s) "
