@@ -834,11 +834,12 @@ def send_signal(sid, signal_name="SIGINT"):
 # Common spinner / animation glyphs across cli-spinners, ora, Claude
 # TUI, etc. Each is replaced with a space before comparing screens, so
 # a spinner cell cycling through these counts as "no change."
+# The braille range U+2800-U+28FF already covers ▖▘▝▗ etc., so we don't
+# enumerate quadrant blocks separately.
 _SPINNER_GLYPHS = (
     "⠀-⣿"   # Braille Patterns (cli-spinners "dots" + many others)
     "▖-▟"   # Block element fractions used by some progress bars
     "✪-✯"   # Various star asterisks
-    "▘▝▖▗"  # Quadrant blocks (some "bouncing dot" sets)
     "◐-◗"   # Circle halves / quadrants (clock-style spinners)
     "◴-◷"   # Pie slice spinners
     "✳✴"    # Eight-pointed asterisks (Claude uses ✸ family)
@@ -848,13 +849,19 @@ _SPINNER_GLYPHS = (
     "*✱❂"   # ASCII *, heavy asterisk, eight-spoked asterisk
 )
 _SPINNER_RE = re.compile(f"[{_SPINNER_GLYPHS}]")
-# Bar-spinner chars ( | / - \ ) with word-boundary guards so we don't
-# eat them inside actual content.
-_BAR_SPINNER_RE = re.compile(r"(?<![A-Za-z0-9])[|/\\\-](?![A-Za-z0-9])")
-# Elapsed timer + counter patterns: "1m 26s", "3.4s", "↓ 5.1k tokens".
+# Bar-spinner chars (|/-\) only when they appear alone (preceded by
+# start-of-string or whitespace AND followed by whitespace or end). The
+# earlier `(?<![A-Za-z0-9])...(?![A-Za-z0-9])` form would also eat the
+# `-` in "hello - world" or the `|` in "foo | bar", which loses real
+# content when comparing screens.
+_BAR_SPINNER_RE = re.compile(r"(?:^|(?<=\s))[|/\\\-](?=\s|$)")
+# Elapsed timer + counter patterns: "1m 26s", "3.4s", "↓ 5.1k tokens",
+# "50%". The negative-lookahead `(?![A-Za-z])` prevents partial matches
+# inside words ("5second" must not match the "sec" suffix).
 _TIMER_RE = re.compile(
     r"\d+(?:[.,]\d+)?\s*[kKmMgG]?\s*"
-    r"(?:ms|s|m|h|d|min|sec|tokens?|KB|MB|GB|chars?|bytes?)\b",
+    r"(?:ms|s|m|h|d|min|sec|tokens?|KB|MB|GB|chars?|bytes?|%)"
+    r"(?![A-Za-z])",
     re.IGNORECASE,
 )
 
