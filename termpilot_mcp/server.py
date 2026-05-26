@@ -443,11 +443,30 @@ TOOLS = [
     types.Tool(
         name="wait_for_idle",
         description=(
-            "Block until the session has produced no new output for quiet_secs "
-            "consecutive seconds, then return the trailing output. Use this as "
-            "a long-poll primitive when waiting for the worker to finish a step "
-            "before reviewing or commenting. One tool call per work cycle, "
-            "much cheaper than tight polling with read_output."
+            "Block until the worker has been idle for quiet_secs "
+            "consecutive seconds, then return. The long-poll primitive "
+            "for orchestration: one tool call per work cycle, far "
+            "cheaper than polling read_screen / read_output.\n"
+            "\n"
+            "Default idle_mode='screen' compares pyte-rendered screens "
+            "with spinner glyphs, braille animations, elapsed timers, "
+            "and token counters stripped before comparison. This is "
+            "what you want when orchestrating another Claude (or any "
+            "TUI worker): the worker's spool keeps growing every "
+            "100 ms from spinner redraws, so a naive byte-level idle "
+            "check will time out even when the worker is genuinely "
+            "'thinking.' Screen mode sees through the animation and "
+            "returns when the actual displayed content stops changing.\n"
+            "\n"
+            "Set idle_mode='bytes' only when the worker is a non-TUI "
+            "script (build, test runner) and you want strict byte-"
+            "level silence detection.\n"
+            "\n"
+            "Returns dict with mode/elapsed/idle_for/spool_end and (in "
+            "screen mode) the rendered `lines` + `cursor` at idle "
+            "time, or (in bytes mode) `bytes` + `new_offset` since the "
+            "prior `since` offset. Raises TimeoutError after `timeout` "
+            "seconds."
         ),
         inputSchema={
             "type": "object",
@@ -456,18 +475,41 @@ TOOLS = [
                 "quiet_secs": {
                     "type": "number",
                     "description": (
-                        "How many consecutive seconds of silence count as 'idle.' "
-                        "Default 15."
+                        "How many consecutive seconds of silence count "
+                        "as 'idle.' Default 15."
                     ),
                     "default": 15.0,
                 },
                 "timeout": {
                     "type": "number",
                     "description": (
-                        "Max seconds to wait for an idle window before giving up. "
-                        "Default 600."
+                        "Max seconds to wait for an idle window before "
+                        "giving up. Default 600."
                     ),
                     "default": 600.0,
+                },
+                "idle_mode": {
+                    "type": "string",
+                    "enum": ["screen", "bytes"],
+                    "description": (
+                        "How to detect idle. `screen` (default) = pyte-"
+                        "rendered screen stops changing modulo "
+                        "animation. `bytes` = spool stops growing. "
+                        "Pick screen for TUI workers (Claude, vim, "
+                        "htop), bytes for scripts whose output is "
+                        "purely line-based logs."
+                    ),
+                    "default": "screen",
+                },
+                "cols": {
+                    "type": "integer",
+                    "description": "screen mode: virtual terminal width. Default 200.",
+                    "default": 200,
+                },
+                "rows": {
+                    "type": "integer",
+                    "description": "screen mode: virtual terminal height. Default 20.",
+                    "default": 20,
                 },
             },
             "required": ["sid"],
@@ -617,6 +659,9 @@ async def _call_tool(name, arguments):
                 args["sid"],
                 quiet_secs=args.get("quiet_secs", 15.0),
                 timeout=args.get("timeout", 600.0),
+                idle_mode=args.get("idle_mode", "screen"),
+                cols=args.get("cols", 200),
+                rows=args.get("rows", 20),
             )
             return _json_text(r)
         if name == "wait_for_output":

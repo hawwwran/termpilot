@@ -480,23 +480,40 @@ def handle_send(argv):
 def handle_wait(argv):
     p = argparse.ArgumentParser(
         prog="tp wait",
-        description="Block until a worker session goes idle or a pattern matches its output.",
+        description="Block until a worker session goes idle or a pattern "
+                    "matches its output. Idle defaults to screen-mode "
+                    "(pyte-rendered screen stops changing modulo spinner / "
+                    "timer animation) - the right answer for TUI workers "
+                    "like another Claude whose spool grows constantly from "
+                    "redraws.",
     )
     p.add_argument("sid", help="session id.")
     g = p.add_mutually_exclusive_group(required=True)
     g.add_argument("--idle", type=float, metavar="SECS",
-                   help="wait until N seconds have passed without spool growth.")
+                   help="wait until the rendered screen has been unchanged "
+                        "for N seconds (animation-aware).")
     g.add_argument("--pattern", metavar="REGEX",
                    help="wait until new (stripped) output matches this regex.")
     p.add_argument("--timeout", type=float, default=600.0, metavar="SECS",
                    help="give up after this many seconds (default: 600).")
+    p.add_argument("--idle-mode", choices=("screen", "bytes"), default="screen",
+                   help="how to detect idle. `screen` (default) = rendered "
+                        "view stops changing modulo animation. `bytes` = "
+                        "strict spool-size silence (use for non-TUI workers).")
+    p.add_argument("--cols", type=int, default=core.DEFAULT_SCREEN_COLS,
+                   help="virtual terminal width for screen-mode idle.")
+    p.add_argument("--rows", type=int, default=core.DEFAULT_SCREEN_ROWS,
+                   help="virtual terminal height for screen-mode idle.")
     p.add_argument("--raw", action="store_true",
                    help="don't strip ANSI escapes when pattern-matching.")
     args = p.parse_args(argv)
     _install_sigpipe_default()
     try:
         if args.idle is not None:
-            r = core.wait_for_idle(args.sid, quiet_secs=args.idle, timeout=args.timeout)
+            r = core.wait_for_idle(
+                args.sid, quiet_secs=args.idle, timeout=args.timeout,
+                idle_mode=args.idle_mode, cols=args.cols, rows=args.rows,
+            )
         else:
             r = core.wait_for_output(
                 args.sid, pattern=args.pattern, timeout=args.timeout,
@@ -507,9 +524,12 @@ def handle_wait(argv):
         return 1
     except KeyboardInterrupt:
         return 130
-    sys.stdout.write(r["bytes"])
-    if not r["bytes"].endswith("\n"):
-        sys.stdout.write("\n")
+    if r.get("mode") == "screen":
+        sys.stdout.write("\n".join(r["lines"]) + "\n")
+    else:
+        sys.stdout.write(r.get("bytes", ""))
+        if r.get("bytes") and not r["bytes"].endswith("\n"):
+            sys.stdout.write("\n")
     return 0
 
 

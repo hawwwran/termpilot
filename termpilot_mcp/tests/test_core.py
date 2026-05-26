@@ -632,18 +632,19 @@ class TestReadOutput(_CacheBaseFixture):
 
 class TestWaiters(_CacheBaseFixture):
 
-    def test_wait_for_idle_returns_on_silence(self):
+    def test_wait_for_idle_bytes_mode_returns_on_silence(self):
         with open(self.spool(), "wb") as f:
             _write_frame(f, b"working...\n")
         t0 = time.monotonic()
-        r = core.wait_for_idle(self.sid, quiet_secs=0.5, timeout=5.0, since=0)
+        r = core.wait_for_idle(self.sid, quiet_secs=0.5, timeout=5.0,
+                               since=0, idle_mode="bytes")
         elapsed = time.monotonic() - t0
         self.assertGreaterEqual(elapsed, 0.5)
+        self.assertEqual(r["mode"], "bytes")
         self.assertEqual(r["bytes"], "working...\n")
 
-    def test_wait_for_idle_timeout(self):
+    def test_wait_for_idle_bytes_mode_timeout(self):
         import threading
-        # Background writer that keeps the spool noisy
         stop = threading.Event()
         def noisy():
             while not stop.is_set():
@@ -654,10 +655,89 @@ class TestWaiters(_CacheBaseFixture):
         t.start()
         try:
             with self.assertRaises(TimeoutError):
-                core.wait_for_idle(self.sid, quiet_secs=0.5, timeout=0.8, since=0)
+                core.wait_for_idle(self.sid, quiet_secs=0.5, timeout=0.8,
+                                   since=0, idle_mode="bytes")
         finally:
             stop.set()
             t.join(timeout=1)
+
+    def test_wait_for_idle_screen_mode_ignores_spinner_animation(self):
+        """Spool grows constantly with spinner redraws, but the rendered
+        screen content is unchanged. Screen mode should detect idle."""
+        try:
+            import pyte  # noqa: F401
+        except ImportError:
+            self.skipTest("pyte not installed")
+        import threading
+        with open(self.spool(), "wb") as f:
+            _write_frame(f, b"\x1b[2J\x1b[Hready\r\n")
+        stop = threading.Event()
+        spinner_chars = "✻✶✢·"
+        # Background "spinner": rewrite cell (1,1) cycling glyphs
+        def spinner():
+            i = 0
+            while not stop.is_set():
+                with open(self.spool(), "ab") as f:
+                    _write_frame(f, f"\x1b[2;1H{spinner_chars[i % 4]}".encode())
+                i += 1
+                time.sleep(0.05)
+        t = threading.Thread(target=spinner, daemon=True)
+        t.start()
+        try:
+            t0 = time.monotonic()
+            r = core.wait_for_idle(self.sid, quiet_secs=0.5, timeout=5.0,
+                                   idle_mode="screen", cols=20, rows=4)
+            elapsed = time.monotonic() - t0
+            self.assertGreaterEqual(elapsed, 0.5)
+            self.assertLess(elapsed, 4.5)  # didn't time out
+            self.assertEqual(r["mode"], "screen")
+            self.assertIn("ready", "\n".join(r["lines"]))
+        finally:
+            stop.set()
+            t.join(timeout=1)
+
+    def test_wait_for_idle_screen_mode_detects_real_change(self):
+        """A real content change (not just animation) resets the idle timer."""
+        try:
+            import pyte  # noqa: F401
+        except ImportError:
+            self.skipTest("pyte not installed")
+        import threading
+        with open(self.spool(), "wb") as f:
+            _write_frame(f, b"first\r\n")
+        # Real new content appears in the middle of the wait
+        stop = threading.Event()
+        def writer():
+            time.sleep(0.3)
+            with open(self.spool(), "ab") as f:
+                _write_frame(f, b"second\r\n")
+        threading.Thread(target=writer, daemon=True).start()
+        t0 = time.monotonic()
+        r = core.wait_for_idle(self.sid, quiet_secs=0.6, timeout=5.0,
+                               idle_mode="screen", cols=20, rows=4)
+        elapsed = time.monotonic() - t0
+        # Must have waited at least 0.3 (until writer fired) + 0.6 (quiet)
+        self.assertGreaterEqual(elapsed, 0.85)
+        self.assertIn("second", "\n".join(r["lines"]))
+
+    def test_normalize_for_idle_strips_spinner_glyphs(self):
+        # Two snapshots that differ only in spinner glyph + timer
+        a = "✻ Cascading… 1m 26s · ↓ 5.1k tokens"
+        b = "✶ Cascading… 1m 27s · ↓ 5.2k tokens"
+        self.assertEqual(core._normalize_for_idle(a),
+                         core._normalize_for_idle(b))
+
+    def test_normalize_for_idle_keeps_real_content_diff(self):
+        a = "Cascading…"
+        b = "Brewing…"
+        self.assertNotEqual(core._normalize_for_idle(a),
+                            core._normalize_for_idle(b))
+
+    def test_normalize_for_idle_strips_braille(self):
+        a = "⠋ working"
+        b = "⠙ working"
+        self.assertEqual(core._normalize_for_idle(a),
+                         core._normalize_for_idle(b))
 
     def test_wait_for_output_matches(self):
         with open(self.spool(), "wb") as f:

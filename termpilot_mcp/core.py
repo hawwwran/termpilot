@@ -804,41 +804,153 @@ def send_signal(sid, signal_name="SIGINT"):
 # ---------------------------------------------------------------------------
 # wait_for_idle
 # ---------------------------------------------------------------------------
+# Two idle-detection modes:
+#
+# - "bytes": spool stops growing for quiet_secs. Wrong for animated TUI
+#   workers (Claude's spinner redraws every 100 ms, so the spool never
+#   stops growing even when the worker is "thinking"). Right when the
+#   worker is a script that periodically prints log lines.
+#
+# - "screen" (default): the *rendered* screen stops changing for
+#   quiet_secs. Strips spinner glyphs, braille animations, elapsed
+#   timers, and token counters before comparing so the cosmetic ticking
+#   doesn't count as "active." This is what boss-Claude almost always
+#   wants when orchestrating another Claude.
 
-def wait_for_idle(sid, quiet_secs=15.0, timeout=600.0, since=None):
-    """Block until the spool has been silent for `quiet_secs`, then return.
+# Common spinner / animation glyphs across cli-spinners, ora, Claude
+# TUI, etc. Each is replaced with a space before comparing screens, so
+# a spinner cell cycling through these counts as "no change."
+_SPINNER_GLYPHS = (
+    "⠀-⣿"   # Braille Patterns (cli-spinners "dots" + many others)
+    "▖-▟"   # Block element fractions used by some progress bars
+    "✪-✯"   # Various star asterisks
+    "▘▝▖▗"  # Quadrant blocks (some "bouncing dot" sets)
+    "◐-◗"   # Circle halves / quadrants (clock-style spinners)
+    "◴-◷"   # Pie slice spinners
+    "✳✴"    # Eight-pointed asterisks (Claude uses ✸ family)
+    "✶✷"    # Six-pointed black star, six-pointed pinwheel
+    "✸✹✺✻✼✽"  # Stars in Claude's spinner set
+    "·•․‧∘∙"  # Middle dot, bullet, dot operator
+    "*✱❂"   # ASCII *, heavy asterisk, eight-spoked asterisk
+)
+_SPINNER_RE = re.compile(f"[{_SPINNER_GLYPHS}]")
+# Bar-spinner chars ( | / - \ ) with word-boundary guards so we don't
+# eat them inside actual content.
+_BAR_SPINNER_RE = re.compile(r"(?<![A-Za-z0-9])[|/\\\-](?![A-Za-z0-9])")
+# Elapsed timer + counter patterns: "1m 26s", "3.4s", "↓ 5.1k tokens".
+_TIMER_RE = re.compile(
+    r"\d+(?:[.,]\d+)?\s*[kKmMgG]?\s*"
+    r"(?:ms|s|m|h|d|min|sec|tokens?|KB|MB|GB|chars?|bytes?)\b",
+    re.IGNORECASE,
+)
 
-    Returns the bytes accumulated between `since` (defaults to the spool's
-    size at call time) and the current end of the spool. Raises
-    `TimeoutError` if no idle window of the requested length occurs within
-    `timeout` seconds.
+
+def _normalize_for_idle(text):
+    """Strip animated/cosmetic content so two screens that differ only
+    in spinner frame / timer tick / token counter compare equal."""
+    text = _SPINNER_RE.sub(" ", text)
+    text = _BAR_SPINNER_RE.sub(" ", text)
+    text = _TIMER_RE.sub(" ", text)
+    return text
+
+
+def _screen_signature(sid, cols, rows):
+    """Pyte-render and return a normalized signature of the visible
+    screen. Two calls produce the same signature when the worker's
+    rendered output is identical modulo spinner/timer animation."""
+    screen, stream = _build_screen(cols, rows)
+    _feed_spool(stream, _spool_path(sid))
+    norm = "\n".join(_normalize_for_idle(line.rstrip())
+                     for line in screen.display)
+    return norm, screen
+
+
+def wait_for_idle(sid, quiet_secs=15.0, timeout=600.0, since=None,
+                  idle_mode="screen", cols=DEFAULT_SCREEN_COLS,
+                  rows=DEFAULT_SCREEN_ROWS):
+    """Block until the worker has been idle for `quiet_secs`, then return.
+
+    `idle_mode="screen"` (default) compares pyte-rendered screens with
+    spinner / timer / counter animation stripped - the right answer for
+    TUI workers (another Claude, vim, htop, ...) whose spool grows
+    constantly from redraws even when nothing real is happening.
+
+    `idle_mode="bytes"` compares spool size only - the original
+    behaviour. Use when the worker is a non-TUI script that periodically
+    prints log lines and you want strict byte-level silence.
+
+    Returns dict with:
+      mode         "screen" or "bytes" (what was used).
+      elapsed      total seconds spent waiting.
+      idle_for     seconds since the last detected change.
+      spool_end    spool offset at idle time.
+      lines        screen mode only: visible screen at idle time.
+      cursor       screen mode only: cursor x/y at idle time.
+      bytes        bytes mode only: text accumulated since `since`.
+      new_offset   bytes mode only: spool offset boss should pass next.
+
+    Raises TimeoutError if no idle window of the requested length occurs
+    within `timeout` seconds.
     """
-    path = _spool_path(sid)
     start = time.monotonic()
     deadline = start + timeout
-    last_size = _safe_getsize(path) or 0
-    if since is None:
-        since = last_size
-    last_growth_at = time.monotonic()
+    path = _spool_path(sid)
+
+    if idle_mode == "bytes":
+        last_size = _safe_getsize(path) or 0
+        if since is None:
+            since = last_size
+        last_change_at = time.monotonic()
+        while True:
+            now = time.monotonic()
+            if now >= deadline:
+                raise TimeoutError(
+                    f"sid {sid!r} did not go idle for {quiet_secs}s "
+                    f"within {timeout}s (mode=bytes)"
+                )
+            cur_size = _safe_getsize(path)
+            if cur_size is None:
+                cur_size = last_size
+            if cur_size > last_size:
+                last_size = cur_size
+                last_change_at = now
+            if now - last_change_at >= quiet_secs:
+                data, new_off, _ = _read_spool_range(
+                    sid, since, max_bytes=64 * 1024,
+                )
+                return {
+                    "mode": "bytes",
+                    "bytes": _ansi_strip(data).decode("utf-8", errors="replace"),
+                    "new_offset": new_off,
+                    "spool_end": _safe_getsize(path) or 0,
+                    "elapsed": now - start,
+                    "idle_for": now - last_change_at,
+                }
+            time.sleep(0.25)
+
+    # idle_mode == "screen"
+    last_sig, last_screen = _screen_signature(sid, cols, rows)
+    last_change_at = time.monotonic()
     while True:
         now = time.monotonic()
         if now >= deadline:
             raise TimeoutError(
-                f"sid {sid!r} did not go idle for {quiet_secs}s within {timeout}s"
+                f"sid {sid!r} did not go idle for {quiet_secs}s "
+                f"within {timeout}s (mode=screen)"
             )
-        cur_size = _safe_getsize(path)
-        if cur_size is None:
-            cur_size = last_size
-        if cur_size > last_size:
-            last_size = cur_size
-            last_growth_at = now
-        if now - last_growth_at >= quiet_secs:
-            data, new_off, _ = _read_spool_range(sid, since, max_bytes=64 * 1024)
+        cur_sig, cur_screen = _screen_signature(sid, cols, rows)
+        if cur_sig != last_sig:
+            last_sig = cur_sig
+            last_screen = cur_screen
+            last_change_at = now
+        if now - last_change_at >= quiet_secs:
             return {
-                "bytes": _ansi_strip(data).decode("utf-8", errors="replace"),
-                "new_offset": new_off,
+                "mode": "screen",
+                "lines": [line.rstrip() for line in last_screen.display],
+                "cursor": {"x": last_screen.cursor.x, "y": last_screen.cursor.y},
+                "spool_end": _safe_getsize(path) or 0,
                 "elapsed": now - start,
-                "idle_for": now - last_growth_at,
+                "idle_for": now - last_change_at,
             }
         time.sleep(0.25)
 
