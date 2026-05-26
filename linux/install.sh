@@ -410,19 +410,20 @@ done
 # Detection: presence of the venv created by `termpilot --activate-mcp`.
 # A fresh install never auto-activates (we don't want install.sh to talk
 # to `claude` and write to the user's MCP config without prior opt-in).
-# A re-install reactivates so the venv picks up requirements.txt changes
-# and the claude-mcp registration points at this checkout's wrapper path.
+# A re-install always reactivates: pip install -r is idempotent (skips
+# already-installed packages), so any newly-added requirements.txt deps
+# get pulled in for free without forcing a full reinstall of everything.
 
 MCP_VENV="$HOME/.local/share/termpilot/mcp-venv"
 if [[ -x "$MCP_VENV/bin/python" ]]; then
     echo
     echo "MCP already activated; refreshing against this checkout..."
-    if "$WRAP_PATH" --activate-mcp --reinstall; then
+    if "$WRAP_PATH" --activate-mcp; then
         echo "  ✓ MCP reactivated"
     else
         rc=$?
         echo "  ! MCP reactivation returned exit $rc (install continues)"
-        echo "    Re-run manually with: termpilot --activate-mcp --reinstall"
+        echo "    Re-run manually with: termpilot --activate-mcp"
     fi
 fi
 
