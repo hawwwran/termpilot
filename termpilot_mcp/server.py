@@ -263,6 +263,72 @@ TOOLS = [
         },
     ),
     types.Tool(
+        name="read_history",
+        description=(
+            "Render the FULL session transcript via pyte's HistoryScreen: "
+            "every line that scrolled past the top of the worker's "
+            "terminal plus the currently-visible screen. Use this when "
+            "the user wants you to audit what the worker has done across "
+            "an entire session - read everything we did together, check "
+            "rules compliance, review tool-use history, summarize a long "
+            "conversation, etc.\n"
+            "\n"
+            "Different from read_screen (which is the current visible "
+            "screen only) and read_output (which is byte history with all "
+            "TUI redraw noise). read_history gives you the clean "
+            "transcript - what the worker actually said and did, no "
+            "spinner-noise, no in-place redraws.\n"
+            "\n"
+            "Returns: history_lines (scrolled-off lines, oldest first); "
+            "lines (currently-visible screen); truncated (true if the "
+            "session is longer than scrollback can hold); cursor; size; "
+            "diagnostics. With keep_color=true also returns history_ansi "
+            "and lines_ansi.\n"
+            "\n"
+            "Cost: pyte runs at ~1 MB/s, so a multi-MB worker spool can "
+            "take several seconds. This is a one-shot audit tool, not a "
+            "live-tail. The default scrollback=5000 captures roughly an "
+            "hour of dense Claude conversation; bump for longer sessions "
+            "(at the cost of more memory + more tokens returned)."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "sid": _SID_SCHEMA,
+                "cols": {
+                    "type": "integer",
+                    "description": "Virtual terminal width. Default 200.",
+                    "default": 200,
+                },
+                "rows": {
+                    "type": "integer",
+                    "description": "Virtual terminal height. Default 20.",
+                    "default": 20,
+                },
+                "scrollback": {
+                    "type": "integer",
+                    "description": (
+                        "Max scrolled-off lines to retain (FIFO). Default "
+                        "5000 (~ an hour of dense Claude convo). Bump for "
+                        "longer sessions; the response includes "
+                        "`truncated:true` if the cap was hit."
+                    ),
+                    "default": 5000,
+                },
+                "keep_color": {
+                    "type": "boolean",
+                    "description": (
+                        "When true, also returns history_ansi and "
+                        "lines_ansi with inline SGR codes. Default false."
+                    ),
+                    "default": False,
+                },
+            },
+            "required": ["sid"],
+            "additionalProperties": False,
+        },
+    ),
+    types.Tool(
         name="send_input",
         description=(
             "Type free-form text into a session (same effect as if the user "
@@ -523,6 +589,15 @@ async def _call_tool(name, arguments):
                 keep_color=args.get("keep_color", False),
                 since_spool_end=args.get("since_spool_end"),
                 wait_secs=args.get("wait_secs", 0.0),
+            )
+            return _json_text(r)
+        if name == "read_history":
+            r = core.render_history(
+                args["sid"],
+                cols=args.get("cols", 200),
+                rows=args.get("rows", 20),
+                scrollback=args.get("scrollback", 5000),
+                keep_color=args.get("keep_color", False),
             )
             return _json_text(r)
         if name == "send_input":

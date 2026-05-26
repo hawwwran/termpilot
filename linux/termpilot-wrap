@@ -794,6 +794,9 @@ Orchestrate another session on this machine (same-machine, no relay)
                                          view (clean for TUI workers);
                                          --mode stream for byte history.
   termpilot screenshot <sid>             one-shot screen render via pyte
+  termpilot transcript <sid>             full session history via pyte
+                                         scrollback (audit-style view of
+                                         everything the worker has done)
   termpilot send <sid> "text"            type into another session.
                                          --key NAME for special keys
                                          (Esc, Tab, ShiftTab, Ctrl-C, Up, ...);
@@ -2502,7 +2505,8 @@ def main(argv=None):
     # startup. See termpilot_mcp/cli.py. We re-exec under the activate-mcp
     # venv first (if it exists) so `import mcp` / `import pyte` resolve
     # without the user juggling PYTHONPATH or interpreter paths.
-    if argv and argv[0] in ("ls", "tail", "screenshot", "send", "wait", "mcp-serve"):
+    if argv and argv[0] in ("ls", "tail", "screenshot", "transcript",
+                            "send", "wait", "mcp-serve"):
         _maybe_reexec_in_mcp_venv(argv)
         from termpilot_mcp import cli as _mcp_cli
         return _mcp_cli.main(argv)

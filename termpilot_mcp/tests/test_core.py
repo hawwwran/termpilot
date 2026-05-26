@@ -528,6 +528,78 @@ class TestRenderScreen(_CacheBaseFixture):
         self.assertIn("38;2;215;119;87", r["lines_ansi"][0])
 
 
+class TestRenderHistory(_CacheBaseFixture):
+    """HistoryScreen captures scrolled-off lines for transcript audits."""
+
+    def _skip_if_no_pyte(self):
+        try:
+            import pyte  # noqa: F401
+        except ImportError:
+            self.skipTest("pyte not installed")
+
+    def test_short_session_no_history(self):
+        self._skip_if_no_pyte()
+        with open(self.spool(), "wb") as f:
+            _write_frame(f, b"hello\r\nworld\r\n")
+        r = core.render_history(self.sid, cols=20, rows=4, scrollback=100)
+        self.assertEqual(r["history_lines"], [])
+        self.assertEqual(r["lines"][0], "hello")
+        self.assertEqual(r["lines"][1], "world")
+        self.assertFalse(r["truncated"])
+
+    def test_long_session_pushes_lines_to_history(self):
+        self._skip_if_no_pyte()
+        with open(self.spool(), "wb") as f:
+            for i in range(10):
+                _write_frame(f, f"line {i}\r\n".encode())
+        r = core.render_history(self.sid, cols=20, rows=3, scrollback=20)
+        # 10 lines produced, 3 visible, ~7 should be in history
+        self.assertGreater(len(r["history_lines"]), 0)
+        full = r["history_lines"] + r["lines"]
+        joined = "\n".join(full)
+        for i in range(10):
+            self.assertIn(f"line {i}", joined,
+                          f"line {i} missing from full history+visible")
+        self.assertFalse(r["truncated"])
+
+    def test_truncated_when_session_exceeds_scrollback(self):
+        self._skip_if_no_pyte()
+        with open(self.spool(), "wb") as f:
+            for i in range(30):
+                _write_frame(f, f"x{i}\r\n".encode())
+        r = core.render_history(self.sid, cols=20, rows=3, scrollback=5)
+        self.assertTrue(r["truncated"])
+        # Oldest lines fell off; newest visible still there
+        self.assertIn("x29", "\n".join(r["lines"]))
+
+    def test_keep_color_history(self):
+        self._skip_if_no_pyte()
+        with open(self.spool(), "wb") as f:
+            # Generate enough lines to push the first one into history
+            _write_frame(f, b"\x1b[31mfirst red line\x1b[0m\r\n")
+            for i in range(10):
+                _write_frame(f, f"line {i}\r\n".encode())
+        r = core.render_history(self.sid, cols=30, rows=3,
+                                scrollback=20, keep_color=True)
+        self.assertIn("history_ansi", r)
+        self.assertIn("lines_ansi", r)
+        # The red line should be in history with its SGR code
+        joined = "\n".join(r["history_ansi"])
+        self.assertIn("\x1b[31m", joined)
+
+    def test_history_as_text_concatenates(self):
+        self._skip_if_no_pyte()
+        rendered = {
+            "history_lines": ["older"],
+            "lines": ["visible"],
+            "cursor": {"x": 0, "y": 0},
+            "size": {"cols": 10, "rows": 1, "scrollback": 5},
+            "truncated": False, "bytes_fed": 0,
+            "frames_fed": 0, "spool_end": 0,
+        }
+        self.assertEqual(core.history_as_text(rendered), "older\nvisible")
+
+
 class TestReadOutput(_CacheBaseFixture):
 
     def test_tail_then_resume(self):

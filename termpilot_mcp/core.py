@@ -387,6 +387,123 @@ def screen_as_text(rendered):
 
 
 # ---------------------------------------------------------------------------
+# render_history -- full scrollback via pyte.HistoryScreen
+# ---------------------------------------------------------------------------
+# read_screen only returns the currently-visible `rows` lines (the worker's
+# active terminal). For "give me the full conversation since session start"
+# we need pyte's HistoryScreen, which keeps a deque of scrolled-off lines
+# in screen.history.top. That captures the rendered transcript - free of
+# the noisy in-place redraws that read_output(strip_ansi=true) would still
+# produce.
+#
+# Performance: pyte.HistoryScreen feeds at ~1 MB/s on a modern CPU. A
+# 10 MB spool (~hours of dense Claude conversation) takes ~10s. That's
+# slow for interactive use but acceptable for one-shot audits.
+
+DEFAULT_HISTORY_SCROLLBACK = 5000
+
+
+def _history_line_to_text(line, cols):
+    """Convert one HistoryScreen history-line (dict col->Char) to a string."""
+    out = []
+    for x in range(cols):
+        ch = line.get(x)
+        out.append(ch.data if ch and ch.data else " ")
+    return "".join(out).rstrip()
+
+
+def _history_line_to_ansi(line, cols):
+    """Same as above, with inline SGR escapes preserved."""
+    out = []
+    cur_sgr = ""
+    for x in range(cols):
+        ch = line.get(x)
+        if ch is None:
+            out.append(" ")
+            continue
+        sgr = _sgr_for_char(ch)
+        if sgr != cur_sgr:
+            if cur_sgr:
+                out.append("\x1b[0m")
+            if sgr:
+                out.append(sgr)
+            cur_sgr = sgr
+        out.append(ch.data or " ")
+    if cur_sgr:
+        out.append("\x1b[0m")
+    return "".join(out).rstrip()
+
+
+def render_history(sid, cols=DEFAULT_SCREEN_COLS, rows=DEFAULT_SCREEN_ROWS,
+                   scrollback=DEFAULT_HISTORY_SCROLLBACK, keep_color=False):
+    """Render the worker's full session through pyte.HistoryScreen.
+
+    Returns the scrolled-off history (oldest first) plus the currently-
+    visible screen, giving boss-Claude the full transcript needed to
+    audit a worker session against rules / instructions / past decisions.
+
+    For sessions older than the scrollback can hold, the oldest lines
+    fall off the top (FIFO). Default 5000 lines captures roughly an
+    hour of dense Claude conversation; bump for longer audits.
+
+    Returns dict with:
+      history_lines  scrolled-off lines, oldest first, plain text.
+      lines          currently-visible rows, plain text.
+      history_ansi   present only when keep_color=True: scrolled-off
+                     lines with inline SGR codes preserving colour.
+      lines_ansi     present only when keep_color=True: visible rows
+                     with inline SGR codes.
+      cursor         {"x": col, "y": row} where the caret is now.
+      size           {"cols": ..., "rows": ..., "scrollback": ...}.
+      truncated      true if older history fell off the top (the spool
+                     produced more rows of transcript than scrollback
+                     could hold). False = boss has the full history.
+      bytes_fed      total payload bytes consumed.
+      frames_fed     number of frames consumed.
+      spool_end      spool offset after the last complete frame.
+    """
+    import pyte
+    screen = pyte.HistoryScreen(cols, rows, history=scrollback)
+    stream = pyte.ByteStream(screen)
+    path = _spool_path(sid)
+    bytes_fed, frames_fed, end_off = _feed_spool(stream, path)
+
+    history_lines = [
+        _history_line_to_text(line, cols) for line in screen.history.top
+    ]
+    lines = [line.rstrip() for line in screen.display]
+    truncated = len(screen.history.top) >= scrollback
+
+    result = {
+        "history_lines": history_lines,
+        "lines": lines,
+        "cursor": {"x": screen.cursor.x, "y": screen.cursor.y},
+        "size": {"cols": cols, "rows": rows, "scrollback": scrollback},
+        "truncated": truncated,
+        "bytes_fed": bytes_fed,
+        "frames_fed": frames_fed,
+        "spool_end": end_off,
+    }
+    if keep_color:
+        result["history_ansi"] = [
+            _history_line_to_ansi(line, cols) for line in screen.history.top
+        ]
+        result["lines_ansi"] = [
+            _row_to_ansi(screen, y, cols) for y in range(rows)
+        ]
+    return result
+
+
+def history_as_text(rendered):
+    """Format a render_history() result as a single newline-joined transcript:
+    scrolled-off history first, then currently-visible screen. Uses
+    *_ansi when present (keep_color=True), else plain text."""
+    if "history_ansi" in rendered:
+        return "\n".join(rendered["history_ansi"] + rendered["lines_ansi"])
+    return "\n".join(rendered["history_lines"] + rendered["lines"])
+
+
+# ---------------------------------------------------------------------------
 # read_output
 # ---------------------------------------------------------------------------
 

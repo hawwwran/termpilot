@@ -538,6 +538,71 @@ def handle_mcp_serve(argv):
 
 
 # ---------------------------------------------------------------------------
+# tp transcript
+# ---------------------------------------------------------------------------
+
+def handle_transcript(argv):
+    p = argparse.ArgumentParser(
+        prog="tp transcript",
+        description="Dump the worker's full session transcript via pyte's "
+                    "HistoryScreen: every line that's scrolled past the top "
+                    "of the terminal plus the current visible screen, "
+                    "rendered clean (no TUI redraw noise). Use this when "
+                    "you need to audit what the worker has done across an "
+                    "entire session, not just a snapshot. Slow on multi-MB "
+                    "spools (pyte runs at ~1 MB/s); intended for one-shot "
+                    "audit-style use, not live tailing.",
+        epilog="Examples:\n"
+               "  tp transcript abc123                         dump full history to stdout\n"
+               "  tp transcript abc123 > worker.log            save to a file\n"
+               "  tp transcript abc123 --scrollback 20000      retain more older lines\n"
+               "  tp transcript abc123 --color always | less -R\n"
+               "                                               keep colours, page in less\n",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p.add_argument("sid", help="session id (12 hex chars; see `tp ls`).")
+    p.add_argument("--cols", type=int, default=core.DEFAULT_SCREEN_COLS)
+    p.add_argument("--rows", type=int, default=core.DEFAULT_SCREEN_ROWS)
+    p.add_argument("--scrollback", type=int, default=core.DEFAULT_HISTORY_SCROLLBACK,
+                   help=f"max scrolled-off lines to retain (default "
+                        f"{core.DEFAULT_HISTORY_SCROLLBACK}; older lines fall "
+                        "off the top FIFO if the session is longer).")
+    p.add_argument("--color", choices=("auto", "always", "never"), default="auto",
+                   help="emit ANSI colour codes; `auto` = colour on TTY.")
+    args = p.parse_args(argv)
+    _install_sigpipe_default()
+    try:
+        import pyte  # noqa: F401
+    except ImportError:
+        print(
+            "tp transcript: requires the `pyte` package "
+            "(run `termpilot --activate-mcp` to install it into the venv).",
+            file=sys.stderr,
+        )
+        return 2
+    keep_color = (
+        args.color == "always"
+        or (args.color == "auto" and sys.stdout.isatty())
+    )
+    try:
+        r = core.render_history(
+            args.sid, cols=args.cols, rows=args.rows,
+            scrollback=args.scrollback, keep_color=keep_color,
+        )
+    except RuntimeError as e:
+        print(f"tp transcript: {e}", file=sys.stderr)
+        return 1
+    sys.stdout.write(core.history_as_text(r) + "\n")
+    if r["truncated"]:
+        sys.stderr.write(
+            f"[note: session is longer than --scrollback ({args.scrollback}); "
+            "oldest lines fell off the top. Pass a larger --scrollback to "
+            "capture more.]\n"
+        )
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # Top-level dispatcher (for `python -m termpilot_mcp.cli ...`)
 # ---------------------------------------------------------------------------
 
@@ -545,6 +610,7 @@ _HANDLERS = {
     "ls": handle_ls,
     "tail": handle_tail,
     "screenshot": handle_screenshot,
+    "transcript": handle_transcript,
     "send": handle_send,
     "wait": handle_wait,
     "mcp-serve": handle_mcp_serve,
@@ -557,8 +623,9 @@ def _print_usage(out=sys.stdout):
         "\n"
         "Termpilot orchestration commands (same-machine):\n"
         "  ls                 List active termpilot sessions on this machine.\n"
-        "  tail <sid>         Watch a session (screen mode in -f, stream mode for pipes).\n"
+        "  tail <sid>         Watch a session (screen mode default).\n"
         "  screenshot <sid>   One-shot pyte-rendered snapshot of the worker's screen.\n"
+        "  transcript <sid>   Full session history via pyte scrollback (audit view).\n"
         "  send <sid> <text>  Type text into a session (local; no relay).\n"
         "  wait <sid>         Block until session is idle or a pattern matches.\n"
         "  mcp-serve          Run the stdio MCP server (called by Claude Code).\n"
