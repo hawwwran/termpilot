@@ -407,7 +407,13 @@ DEFAULT_HISTORY_SCROLLBACK = 5000
 
 
 def _history_line_to_text(line, cols):
-    """Convert one HistoryScreen history-line (dict col->Char) to a string."""
+    """Convert one HistoryScreen history-line to a string.
+
+    pyte 0.8 stores history lines as a StaticDefaultDict-like mapping
+    of column index -> Char with a `.get(x)` method. If a future pyte
+    changes the structure (e.g. to a list), update both this and
+    `_history_line_to_ansi` accordingly.
+    """
     out = []
     for x in range(cols):
         ch = line.get(x)
@@ -416,7 +422,8 @@ def _history_line_to_text(line, cols):
 
 
 def _history_line_to_ansi(line, cols):
-    """Same as above, with inline SGR escapes preserved."""
+    """Same as `_history_line_to_text`, with inline SGR escapes preserved.
+    Pyte-version contract: see `_history_line_to_text`."""
     out = []
     cur_sgr = ""
     for x in range(cols):
