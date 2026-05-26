@@ -2327,10 +2327,9 @@ def _maybe_reexec_in_mcp_venv(argv):
     venv_python = os.path.join(MCP_VENV_DEFAULT, "bin", "python")
     if not os.path.isfile(venv_python):
         return
-    try:
-        if os.path.realpath(sys.prefix) == os.path.realpath(MCP_VENV_DEFAULT):
-            return
-    except OSError:
+    # os.path.realpath doesn't raise for non-existent paths, so this is
+    # a simple equality check on the resolved venv root.
+    if os.path.realpath(sys.prefix) == os.path.realpath(MCP_VENV_DEFAULT):
         return
     os.execv(
         venv_python,
