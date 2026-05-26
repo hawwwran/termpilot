@@ -112,17 +112,20 @@ def handle_tail(argv):
     p = argparse.ArgumentParser(
         prog="tp tail",
         description="Show output from a session. Two modes: `screen` "
-                    "renders the worker's current terminal via pyte (default "
-                    "for -f, much cleaner for TUI workers like Claude or "
-                    "vim); `stream` prints raw bytes-since-offset (the "
-                    "transcript view, useful for non-TUI output or grep). "
-                    "In stream mode, pass --raw when colour carries meaning "
-                    "(e.g. zsh autosuggest, Claude's UI colour-coding) - "
-                    "ANSI stripping flattens visually-distinct content to "
+                    "(default) renders the worker's current terminal via "
+                    "pyte - the right answer for orchestrating TUI "
+                    "workers like another Claude, vim, htop, lazygit, "
+                    "etc. `stream` prints raw bytes-since-offset (the "
+                    "transcript view) and is what you want for pipelines "
+                    "like `tp tail <sid> --mode stream | grep error`. In "
+                    "stream mode, pass --raw when colour carries meaning "
+                    "(zsh autosuggest, Claude's UI colour-coding) - ANSI "
+                    "stripping flattens visually-distinct content to "
                     "identical text.",
         epilog="Examples:\n"
-               "  tp tail abc123 -f               watch a worker live (screen mode)\n"
-               "  tp tail abc123 --mode stream    one-shot byte-history\n"
+               "  tp tail abc123                  one-shot pyte render of the worker screen\n"
+               "  tp tail abc123 -f               watch the worker live (screen, redraws ~2 Hz)\n"
+               "  tp tail abc123 --mode stream    byte-history transcript instead of screen\n"
                "  tp tail abc123 --mode stream --raw | grep 'error'\n"
                "                                  keep colours so red errors stand out\n"
                "  tp tail abc123 -f --rows 30 --cols 160\n"
@@ -131,10 +134,11 @@ def handle_tail(argv):
     )
     p.add_argument("sid", help="session id (12 hex chars; see `tp ls`).")
     p.add_argument("--mode", choices=("screen", "stream"), default=None,
-                   help="`screen` = pyte-rendered terminal view, "
-                        "`stream` = byte history with ANSI stripped. "
-                        "Default: screen for -f, stream otherwise "
-                        "(stream is what fits a one-shot pipeline).")
+                   help="`screen` = pyte-rendered terminal view (default; "
+                        "best for orchestrating TUI workers like another "
+                        "Claude). `stream` = byte history with ANSI "
+                        "stripped (use for pipelines: "
+                        "`tp tail abc --mode stream | grep error`).")
     p.add_argument("-f", "--follow", action="store_true",
                    help="keep watching; in screen mode redraws the screen "
                         "every ~0.5 s; in stream mode long-polls for new "
@@ -171,7 +175,7 @@ def handle_tail(argv):
                         "strings.")
     args = p.parse_args(argv)
     _install_sigpipe_default()
-    mode = args.mode or ("screen" if args.follow else "stream")
+    mode = args.mode or "screen"
     if mode == "screen":
         return _tail_screen(args)
     return _tail_stream(args)
