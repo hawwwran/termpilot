@@ -2274,6 +2274,42 @@ def _locate_termpilot_mcp() -> str | None:
 MCP_VENV_DEFAULT = os.path.expanduser("~/.local/share/termpilot/mcp-venv")
 
 
+def _maybe_reexec_in_mcp_venv(argv):
+    """Re-exec the wrapper under the activate-mcp venv's Python.
+
+    The wrapper's shebang is system Python, which on PEP 668-protected
+    distros (Debian/Ubuntu/Zorin) can't have `mcp` or `pyte` installed.
+    The venv built by `termpilot --activate-mcp` has both. For MCP-side
+    subcommands (ls / tail / screenshot / send / wait / mcp-serve) we
+    transparently re-exec into the venv so the relevant imports work
+    without the user thinking about Python interpreters.
+
+    No-op if the venv doesn't exist yet (subcommands that don't need
+    third-party deps still run; ones that do print a clear
+    "run --activate-mcp first" message). No-op if we're already
+    running under the venv interpreter.
+
+    Loop guard: we compare sys.prefix (the venv root) rather than
+    sys.executable. Venv pythons are usually symlinks to the system
+    interpreter, so realpath(sys.executable) collapses them onto the
+    same /usr/bin/pythonX.Y and the naive check fires on every entry.
+    sys.prefix is the venv directory itself; that's the canonical
+    "am I inside this venv" signal.
+    """
+    venv_python = os.path.join(MCP_VENV_DEFAULT, "bin", "python")
+    if not os.path.isfile(venv_python):
+        return
+    try:
+        if os.path.realpath(sys.prefix) == os.path.realpath(MCP_VENV_DEFAULT):
+            return
+    except OSError:
+        return
+    os.execv(
+        venv_python,
+        [venv_python, os.path.realpath(__file__)] + list(argv),
+    )
+
+
 def cmd_activate_mcp(argv):
     """Provision a venv with the `mcp` SDK and register termpilot with Claude Code."""
     p = argparse.ArgumentParser(
@@ -2463,8 +2499,11 @@ def main(argv=None):
     if argv and argv[0] in ("deactivate-mcp", "--deactivate-mcp"):
         return cmd_deactivate_mcp(argv[1:])
     # termpilot_mcp subcommands; lazy-imported so they don't slow run-mode
-    # startup. See termpilot_mcp/cli.py.
+    # startup. See termpilot_mcp/cli.py. We re-exec under the activate-mcp
+    # venv first (if it exists) so `import mcp` / `import pyte` resolve
+    # without the user juggling PYTHONPATH or interpreter paths.
     if argv and argv[0] in ("ls", "tail", "screenshot", "send", "wait", "mcp-serve"):
+        _maybe_reexec_in_mcp_venv(argv)
         from termpilot_mcp import cli as _mcp_cli
         return _mcp_cli.main(argv)
     if argv and argv[0] == "run":
