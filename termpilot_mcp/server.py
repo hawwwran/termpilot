@@ -201,15 +201,21 @@ TOOLS = [
             "wait_secs=30) in a loop and only burn tokens when there's "
             "actually new content to read.\n"
             "\n"
-            "*** keep_color: pass true when colour carries meaning ***\n"
-            "Default false (plain text, cheap on tokens). Pass true when "
-            "the worker uses colour to distinguish content the model needs "
-            "to read apart: zsh/fish autosuggest ghost completions (dim "
-            "grey vs typed bright), Claude's user-vs-suggestion colour-"
-            "coding, compiler severity, syntax highlighting. With "
-            "keep_color=true the returned `lines_ansi` has SGR escapes "
-            "inline (`\\x1b[3?m` foreground, `\\x1b[1m` bold, etc.) so the "
-            "model can grep for colour codes to disambiguate."
+            "*** Recommended workflow: plain first, colour on doubt ***\n"
+            "Default to keep_color=false (plain text, cheap on tokens). "
+            "Only spend the extra tokens for colour when a plain-text "
+            "read leaves something ambiguous: input box text that might "
+            "be typed-vs-dim-autosuggest-ghost, a menu where the "
+            "highlighted item isn't obvious, two visually-distinct "
+            "regions that flatten to identical text without ANSI. In "
+            "that case, follow up with a SECOND read_screen on the same "
+            "sid with keep_color=true and disambiguate from the returned "
+            "`lines_ansi` (ghost text in dim grey vs typed in default "
+            "colour; selected menu items typically have inverse or "
+            "coloured background; severity uses red/yellow/green). "
+            "Spending the tokens for a one-off verification beats acting "
+            "on a wrong guess. Don't ask for colour up-front by reflex - "
+            "ask for it when uncertainty appears."
         ),
         inputSchema={
             "type": "object",
@@ -229,10 +235,13 @@ TOOLS = [
                     "type": "boolean",
                     "description": (
                         "When true, also returns `lines_ansi` with inline "
-                        "ANSI/SGR codes that preserve colour, bold, etc. "
-                        "Default false. PASS TRUE when colour carries "
-                        "meaning (autosuggest ghosts, Claude UI colour-"
-                        "coding, severity highlighting)."
+                        "ANSI/SGR codes (colour, bold, etc.). Default "
+                        "false. Pass true as a FOLLOW-UP read when a "
+                        "previous plain-text read was ambiguous "
+                        "(autosuggest ghost vs typed text, menu "
+                        "highlighting, severity colour). Don't request "
+                        "by reflex - the colour render is roughly 2x the "
+                        "token cost of plain."
                     ),
                     "default": False,
                 },
@@ -347,7 +356,15 @@ TOOLS = [
             "plain text, multi-key sequences (e.g. \"hello\\t\" for type-"
             "then-Tab), or sending a JSON-escaped raw byte you need to "
             "inline. The byte map is the same as `send_key` accepts (see "
-            "`tp send --list-keys` for the canonical reference)."
+            "`tp send --list-keys` for the canonical reference).\n"
+            "\n"
+            "Ghost-text caveat: after typing into a worker with autosuggest "
+            "(Claude TUI, zsh-autosuggestions, fish) the input box may "
+            "display BOTH your typed text AND a predictive ghost in dim "
+            "colour. If a subsequent plain read_screen shows unexpected "
+            "text sitting in the prompt that you didn't send, re-read "
+            "with keep_color=true to distinguish typed-vs-ghost before "
+            "concluding it's leftover state."
         ),
         inputSchema={
             "type": "object",
