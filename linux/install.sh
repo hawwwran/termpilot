@@ -409,17 +409,28 @@ for rc in "${RC_FILES[@]}"; do
 done
 
 # --- Reactivate MCP if previously activated -------------------------------
-# Detection: presence of the venv created by `termpilot --activate-mcp`.
-# A fresh install never auto-activates (we don't want install.sh to talk
-# to `claude` and write to the user's MCP config without prior opt-in).
-# A re-install always reactivates: pip install -r is idempotent (skips
-# already-installed packages), so any newly-added requirements.txt deps
-# get pulled in for free without forcing a full reinstall of everything.
+# Detection: a marker file at ~/.config/termpilot/mcp-active, written by
+# `termpilot --activate-mcp` and removed by --deactivate-mcp. A fresh
+# install never auto-activates (we don't want install.sh to talk to
+# `claude` and write to the user's MCP config without prior opt-in).
+# A re-install always reactivates: --activate-mcp rebuilds the venv from
+# scratch and re-registers, so the new wrapper is paired with a matching
+# `mcp` package version (no chance of skew from a stale venv).
+#
+# Legacy migration: pre-marker activations only left a venv behind.
+# Stamp the marker if we see a venv but no marker, so users who
+# activated under the old convention still get reactivated.
 
 MCP_VENV="$HOME/.local/share/termpilot/mcp-venv"
-if [[ -x "$MCP_VENV/bin/python" ]]; then
+MCP_ACTIVE_MARKER="$HOME/.config/termpilot/mcp-active"
+if [[ ! -f "$MCP_ACTIVE_MARKER" && -x "$MCP_VENV/bin/python" ]]; then
+    mkdir -p "$(dirname "$MCP_ACTIVE_MARKER")"
+    date +%s > "$MCP_ACTIVE_MARKER"
+fi
+
+if [[ -f "$MCP_ACTIVE_MARKER" ]]; then
     echo
-    echo "MCP already activated; refreshing against this checkout..."
+    echo "MCP previously activated; rebuilding venv against this install..."
     if "$WRAP_PATH" --activate-mcp; then
         echo "  ✓ MCP reactivated"
     else

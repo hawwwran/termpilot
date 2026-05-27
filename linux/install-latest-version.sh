@@ -108,10 +108,11 @@ mkdir -p "$INSTALL_ROOT"
 # Clean prior contents but keep the dir itself (preserves any data the
 # user might have placed inside, plus surrounding state like a worktree
 # parent we don't own). Top-level entries only — fast and safe.
-# Spare mcp-venv/: it's the pip-installed `mcp` package, not part of the
-# release zip. install.sh keys reactivation off its presence, so wiping
-# it here silently breaks the MCP for every upgrade.
-find "$INSTALL_ROOT" -mindepth 1 -maxdepth 1 ! -name mcp-venv -exec rm -rf {} +
+# Wiping mcp-venv along with everything else is intentional: install.sh
+# detects prior MCP activation via ~/.config/termpilot/mcp-active (outside
+# this dir) and runs --activate-mcp afterward, which rebuilds the venv
+# fresh against the new wrapper — no chance of mcp-package version skew.
+find "$INSTALL_ROOT" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
 if ! unzip -q "$ZIP_PATH" -d "$INSTALL_ROOT"; then
     fail "unzip failed."
     exit 1

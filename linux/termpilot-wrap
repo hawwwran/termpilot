@@ -2304,6 +2304,14 @@ def _locate_termpilot_mcp() -> str | None:
 
 MCP_VENV_DEFAULT = os.path.expanduser("~/.local/share/termpilot/mcp-venv")
 
+# Marker file recording user intent ("MCP has been activated"). Lives
+# under ~/.config/ so it survives install.sh wiping ~/.local/share/
+# during upgrades, letting install.sh rebuild a fresh venv against the
+# new wrapper. Venv presence is too noisy a signal — it can be wiped
+# legitimately (release upgrade) or missing legitimately (never opted
+# in), and the two cases need opposite responses.
+MCP_ACTIVE_MARKER = os.path.expanduser("~/.config/termpilot/mcp-active")
+
 
 def _maybe_reexec_in_mcp_venv(argv):
     """Re-exec the wrapper under the activate-mcp venv's Python.
@@ -2485,6 +2493,13 @@ def cmd_activate_mcp(argv):
         sys.stderr.write(f"error: pip install failed (exit {e.returncode})\n")
         return 1
 
+    try:
+        os.makedirs(os.path.dirname(MCP_ACTIVE_MARKER), exist_ok=True)
+        with open(MCP_ACTIVE_MARKER, "w") as f:
+            f.write(f"{int(time.time())}\n")
+    except OSError as e:
+        sys.stderr.write(f"warning: could not write {MCP_ACTIVE_MARKER}: {e}\n")
+
     wrap_real = os.path.realpath(__file__)
     specs = _mcp_client_specs(venv_python, wrap_real, args.scope)
     skip_names = set()
@@ -2576,6 +2591,13 @@ def cmd_deactivate_mcp(argv):
         skip_names.add("claude")
     if args.no_codex:
         skip_names.add("codex")
+
+    try:
+        os.remove(MCP_ACTIVE_MARKER)
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        sys.stderr.write(f"warning: could not remove {MCP_ACTIVE_MARKER}: {e}\n")
 
     print("MCP client unregistration:")
     for spec in specs:
