@@ -108,7 +108,10 @@ mkdir -p "$INSTALL_ROOT"
 # Clean prior contents but keep the dir itself (preserves any data the
 # user might have placed inside, plus surrounding state like a worktree
 # parent we don't own). Top-level entries only — fast and safe.
-find "$INSTALL_ROOT" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+# Spare mcp-venv/: it's the pip-installed `mcp` package, not part of the
+# release zip. install.sh keys reactivation off its presence, so wiping
+# it here silently breaks the MCP for every upgrade.
+find "$INSTALL_ROOT" -mindepth 1 -maxdepth 1 ! -name mcp-venv -exec rm -rf {} +
 if ! unzip -q "$ZIP_PATH" -d "$INSTALL_ROOT"; then
     fail "unzip failed."
     exit 1
