@@ -105,6 +105,17 @@ echo ""
 # ---- Extract --------------------------------------------------------------
 step "Extracting to ${INSTALL_ROOT}..."
 mkdir -p "$INSTALL_ROOT"
+# Stamp the MCP intent marker for legacy installs (pre-marker --activate-mcp
+# left only a venv behind) BEFORE the wipe destroys the venv. install.sh
+# also has a backfill, but only sees post-wipe state, so the migration
+# has to happen here for upgrades via this script.
+LEGACY_MCP_VENV="$INSTALL_ROOT/mcp-venv"
+MCP_ACTIVE_MARKER="$HOME/.config/termpilot/mcp-active"
+if [[ -x "$LEGACY_MCP_VENV/bin/python" && ! -f "$MCP_ACTIVE_MARKER" ]]; then
+    mkdir -p "$(dirname "$MCP_ACTIVE_MARKER")"
+    date +%s > "$MCP_ACTIVE_MARKER"
+    info "migrated legacy MCP activation marker to $MCP_ACTIVE_MARKER"
+fi
 # Clean prior contents but keep the dir itself (preserves any data the
 # user might have placed inside, plus surrounding state like a worktree
 # parent we don't own). Top-level entries only — fast and safe.
