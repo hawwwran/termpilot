@@ -26,7 +26,18 @@ import time
 # it is a pure-side-effect-free operation; module-level code only sets up
 # constants and sys.path probes that we benefit from.
 _REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
-_WRAP_PATH = _REPO_ROOT / "linux" / "termpilot-wrap"
+# Dev tree keeps the wrapper under linux/; the release zip flattens it to
+# the install root next to termpilot_mcp/. Probe both, matching the
+# wrapper's own shared/ sys.path probe.
+for _cand in (_REPO_ROOT / "linux" / "termpilot-wrap", _REPO_ROOT / "termpilot-wrap"):
+    if _cand.is_file():
+        _WRAP_PATH = _cand
+        break
+else:
+    raise FileNotFoundError(
+        f"termpilot-wrap not found in dev layout ({_REPO_ROOT}/linux/) "
+        f"or flat layout ({_REPO_ROOT}/)"
+    )
 _loader = importlib.machinery.SourceFileLoader("tp_wrap", str(_WRAP_PATH))
 _spec = importlib.util.spec_from_loader("tp_wrap", _loader)
 _tp_wrap = importlib.util.module_from_spec(_spec)
