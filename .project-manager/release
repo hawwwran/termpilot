@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+# Release script for Project Manager: ~/git/project-manager/docs/project-folder.md (spec 1).
+#
+# Pushes the tag; GitHub Actions (.github/workflows/release.yml) stamps VERSION.json, builds
+# one zip per platform with tools/build-release.sh and publishes the release with the
+# commit log as its notes. The workflow refuses a tag that is not on the tip of main.
+# The relay is not in either zip (tools/deploy.sh uploads it), so its commits are left out.
+set -euo pipefail
+
+REPO="hawwwran/termpilot"
+# Keep in sync with tools/build-release.sh.
+ASSETS=(termpilot-linux-macos.zip termpilot-windows.zip)
+
+describe() {
+    cat <<'JSON'
+{
+  "spec": 1,
+  "actions": [
+    {"id": "release", "label": "Release",
+     "summary": "Pushes the tag; GitHub Actions builds the Linux/macOS and Windows zips and publishes the release.",
+     "tag": "v{version}",
+     "paths": ["!relay/"],
+     "notes": false,
+     "dry_run": true}
+  ]
+}
+JSON
+}
+
+check() {
+    local ready=0
+    if ! command -v gh >/dev/null 2>&1; then
+        echo "::fail gh is not installed"
+        echo "::hint sudo apt install gh"
+        return 1
+    fi
+    if gh auth status >/dev/null 2>&1; then
+        echo "::ok Logged in to GitHub as $(gh api user --jq .login 2>/dev/null)"
+        if [ "$(gh api "repos/$REPO" --jq .permissions.push 2>/dev/null)" = true ]; then
+            echo "::ok Can push to $REPO"
+        else
+            echo "::fail No push access to $REPO"
+            ready=1
+        fi
+    else
+        echo "::fail Not logged in to GitHub"
+        echo "::hint gh auth login"
+        ready=1
+    fi
+    return "$ready"
+}
+
+missing_assets() {
+    local attached asset
+    attached=$(gh release view "$PM_TAG" --repo "$REPO" --json assets --jq '.assets[].name' 2>/dev/null || true)
+    for asset in "${ASSETS[@]}"; do
+        grep -qx "$asset" <<<"$attached" || echo "$asset"
+    done
+}
+
+run() {
+    echo "::step Tagging $PM_TAG"
+    git tag -a "$PM_TAG" -m "Release $PM_TAG"
+    if [ "${PM_DRY_RUN:-}" = 1 ]; then
+        echo "::step Building the zips as GitHub Actions will"
+        bash tools/build-release.sh linux >/dev/null
+        bash tools/build-release.sh windows >/dev/null
+        for asset in "${ASSETS[@]}"; do
+            echo "$(du -h "dist/$asset" | cut -f1) $asset"
+        done
+        echo "::warn Dry run: $PM_TAG was made in the clone and not pushed"
+        return 0
+    fi
+
+    # The workflow would refuse the tag after it is pushed, leaving a tag with no release.
+    if [ "$(git ls-remote origin "refs/heads/$PM_DEFAULT_BRANCH" | cut -f1)" != "$(git rev-parse HEAD)" ]; then
+        echo "::fail $PM_DEFAULT_BRANCH moved on GitHub since; start the release again. Nothing was pushed"
+        exit 1
+    fi
+
+    echo "::point-of-no-return"
+    echo "::step Pushing $PM_TAG"
+    if ! git push --quiet origin "$PM_TAG"; then
+        echo "::fail Pushing $PM_TAG failed; nothing was pushed"
+        exit 1
+    fi
+
+    echo "::step Waiting for GitHub Actions to build ${ASSETS[*]}"
+    local missing
+    for _ in $(seq 60); do
+        sleep 5
+        missing=$(missing_assets)
+        if [ -z "$missing" ]; then
+            for asset in "${ASSETS[@]}"; do
+                echo "Download: https://github.com/$REPO/releases/latest/download/$asset"
+            done
+            echo "Install on Linux/macOS: curl -fsSL https://raw.githubusercontent.com/$REPO/main/linux/install-latest-version.sh | bash"
+            echo "::url $(gh release view "$PM_TAG" --repo "$REPO" --json url --jq .url)"
+            return 0
+        fi
+    done
+    echo "::warn $PM_TAG is pushed, but GitHub Actions had not attached ${missing//$'\n'/ } within 5 minutes; it may still be building"
+    echo "::url https://github.com/$REPO/actions"
+}
+
+case "${1:-}" in
+    describe) describe ;;
+    check) check ;;
+    run) run ;;
+    *) echo "usage: release describe | check ACTION | run ACTION" >&2; exit 2 ;;
+esac
